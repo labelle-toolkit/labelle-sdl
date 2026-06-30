@@ -1,0 +1,25 @@
+.{
+    .fingerprint = 0x74c86001d364209,
+    .name = .labelle_sdl,
+    .version = "0.1.0",
+    .minimum_zig_version = "0.16.0",
+    .dependencies = .{
+        // Frozen cross-backend gamepad event contract (GamepadEvent /
+        // GamepadDescription, core#18). The SDL input backend produces
+        // these for the engine's InputInterface.pollGamepadEvents path.
+        // The contract landed in the v1.15.0 release tag.
+        .labelle_core = .{
+            .url = "https://github.com/labelle-toolkit/labelle-core/archive/refs/tags/v1.15.0.tar.gz",
+            .hash = "labelle_core-1.15.0-OauRcIDMAwCys-pGbaVktdIZZk65hbXkrzzqd0Jk_XjY",
+        },
+    },
+    .paths = .{
+        "build.zig",
+        "build.zig.zon",
+        "build_helpers.zig",
+        "backend.manifest.zon",
+        "build_fragments",
+        "templates",
+        "src",
+    },
+}

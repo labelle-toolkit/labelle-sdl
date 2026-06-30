@@ -1,0 +1,12 @@
+    const backend_dep = b.dependency("labelle_sdl", .{ .target = target, .optimize = optimize });
+    const backend_gfx = backend_dep.module("gfx");
+    const backend_input = backend_dep.module("input");
+    const backend_audio = backend_dep.module("audio");
+    const backend_window = backend_dep.module("window");
+
+    // Unify labelle-core onto the backend `input` module — see the note in
+    // `.backend_raylib`. NOTE: the SDL backend declares this import under the
+    // underscore name `"labelle_core"` (not the hyphenated `"labelle-core"`),
+    // so the override key must match. See labelle-assembler#258.
+    overrideImport(backend_input, "labelle_core", core_mod);
+

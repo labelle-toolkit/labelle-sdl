@@ -1,0 +1,49 @@
+const screen_w: u32 = {{width}};
+const screen_h: u32 = {{height}};
+const screen_title = "{{title}}";
+const target_fps: u32 = {{fps}};
+
+{{module_vars}}pub fn main() !void {
+    var gpa = std.heap.DebugAllocator(.{}).init;
+    defer _ = gpa.deinit();
+    const allocator = gpa.allocator();
+
+{{hidden_setup}}    window.initWindow(screen_w, screen_h, screen_title);
+    defer window.closeWindow();
+    window.setTargetFPS(target_fps);
+
+{{hooks_init_block}}
+    var g = AssembledGame.init(allocator);
+    defer g.deinit();
+
+    g.setHooks(&hooks);
+
+    g.setScreenHeight(@as(f32, @floatFromInt(screen_h)));
+
+{{preview_setup}}{{setup_code}}
+    while (!window.windowShouldClose()) {
+        const dt: f32 = 0.016;
+        // Apply a pending fullscreen/windowed switch requested via
+        // `game.setFullscreen`/`toggleFullscreen`. The engine owns the
+        // desired flag; the backend owns the platform call. Gated on BOTH
+        // the backend exposing `setFullscreen` and the engine exposing the
+        // drain, so the template stays compatible with backends/engines
+        // that predate the API (older example projects still build).
+        if (comptime @hasDecl(window, "setFullscreen") and @hasDecl(@TypeOf(g), "takeFullscreenRequest")) {
+            if (g.takeFullscreenRequest()) |on| window.setFullscreen(on);
+        }
+        // Vsync: same engine-owned-flag / backend-applies split as fullscreen.
+        // Folds away on backends without `setVsync` or engines predating the API.
+        if (comptime @hasDecl(window, "setVsync") and @hasDecl(@TypeOf(g), "takeVsyncRequest")) {
+            if (g.takeVsyncRequest()) |on| window.setVsync(on);
+        }
+{{preview_heartbeat}}{{tick_code}}        g.tick(dt);
+
+        window.beginDrawing();
+        window.clearBackground(245, 245, 245, 255);
+        g.render();
+        g.renderGizmos();
+{{gui_draw_code}}        window.drawText(screen_title, 10, 10, 20, 80, 80, 80, 255);
+        window.endDrawing();
+    }
+}

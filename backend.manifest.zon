@@ -1,0 +1,14 @@
+.{
+    // sdl backend manifest — pluggable-backends epic (#386). Opts the sdl
+    // DESKTOP build into the manifest-splice path. Byte-identical to the enum
+    // path. Loop-style, desktop-only. No params; EMPTY link fragment (SDL2 is
+    // linked by the backend's own build.zig, not a consumer linkLibrary). The
+    // backend_dep fragment carries the input core-diamond override (underscore
+    // `labelle_core` key, per #258).
+    .dir_name = "sdl",
+    .dep_name = "labelle_sdl",
+    .loop_style = .loop,
+    .main_loop_template = "templates/desktop.txt",
+    .build_fragments = .{ .backend_dep = "build_fragments/backend_dep.txt", .link = "build_fragments/link.txt" },
+    .params = .{ .backend_dep = .{}, .link = .{} },
+}
