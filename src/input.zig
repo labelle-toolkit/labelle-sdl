@@ -4,6 +4,13 @@ const std = @import("std");
 const c = @import("sdl").c;
 const core = @import("labelle_core");
 
+// Contract-version tag (labelle-assembler#453 item 1). The assembler emits a
+// directional `@compileError` version assert in the generated game's main.zig
+// comparing this against labelle-core's `INPUT_CONTRACT_VERSION`. v1 is the
+// initial revision. This module satisfies the input contract's required core
+// (isKeyDown/isKeyPressed) plus the optional mouse/touch/gamepad surfaces.
+pub const targets_input_contract: u32 = 1;
+
 const GamepadEvent = core.GamepadEvent;
 const GamepadDescription = core.GamepadDescription;
 const GamepadSourceClass = core.GamepadSourceClass;

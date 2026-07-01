@@ -11,4 +11,34 @@
     .main_loop_template = "templates/desktop.txt",
     .build_fragments = .{ .backend_dep = "build_fragments/backend_dep.txt", .link = "build_fragments/link.txt" },
     .params = .{ .backend_dep = .{}, .link = .{} },
+
+    // Canonical provider identity (#453). sdl is an official provider, so it
+    // lives under the reserved `labelle.` namespace. The enum tag `.sdl` is a
+    // shorthand for exactly this id — `validateProviderIdentity` drift-checks it.
+    .id = "labelle.sdl",
+
+    // Declared capabilities (#453) — what the SDL2 backend ACTUALLY implements.
+    // Deliberately narrow: sdl is DESKTOP-ONLY (only templates/desktop.txt, no
+    // wasm/android/ios build), so it claims none of the platform capabilities.
+    //   - `.gamepad_polling` — `input.pollGamepadEvents`/`describeGamepads` +
+    //                          the button/axis query path, backed by SDL's own
+    //                          SDL_GameController API (native to this backend).
+    // NOT declared, and why:
+    //   - `.screenshots` — no `window.takeScreenshot`.
+    //   - `.compressed_textures` — no `gfx.isCompressed`/`uploadCompressed`;
+    //                              loadTexture is BMP-only, no ASTC upload path.
+    //   - `.fonts` — no `gfx.decodeFont`/`uploadFontAtlas` font-atlas loader;
+    //                drawText uses a hardcoded embedded bitmap font, not a
+    //                loadable atlas.
+    //   - `.raw_gui_adapter` — sdl ships no in-backend imgui adapter.
+    //   - `.audio_ogg` — SDL_mixer is used, but the backend never calls
+    //                    Mix_Init(MIX_INIT_OGG), so OGG decode is not enabled;
+    //                    only WAV (Mix_LoadWAV) is guaranteed.
+    //   - `.wasm` / `.android` / `.ios` — desktop-only; no mobile/web templates.
+    //   - `.surface_loss` — desktop only; no mobile GPU surface lifecycle.
+    //   - `.headless` — sdl always creates a window (the true no-window path is
+    //                   the separate `null` backend).
+    .capabilities = .{
+        .gamepad_polling,
+    },
 }

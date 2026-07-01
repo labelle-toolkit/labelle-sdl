@@ -2,6 +2,16 @@
 const std = @import("std");
 const c = @import("sdl").c;
 
+// Contract-version tags (labelle-assembler#453 item 1). The assembler emits
+// directional `@compileError` version asserts in the generated game's main.zig
+// comparing these against labelle-core's `*_CONTRACT_VERSION` consts. v1 is the
+// initial revision of each contract. The SDL gfx module satisfies BOTH the draw
+// contract (drawTexturePro/drawRectangleRec/drawCircle/drawTriangle/drawPolygon/
+// drawLine/drawText + camera/coordinate decls) and the loader contract
+// (loadTexture/decodeImage/uploadTexture/unloadTexture — BMP CPU decode today).
+pub const targets_draw_contract: u32 = 1;
+pub const targets_loader_contract: u32 = 1;
+
 // ── Backend types ──────────────────────────────────────────────────────
 
 const MAX_TEXTURES = 512;
@@ -453,6 +463,75 @@ pub fn drawCircle(center_x: f32, center_y: f32, radius: f32, tint: Color) void {
             err += 2 * (y - x) + 1;
         }
     }
+}
+
+/// Filled triangle. Base SDL2 has no polygon-fill primitive (SDL_RenderGeometry
+/// is 2.0.18+ and not assumed here), so this scanline-rasterises the triangle
+/// into horizontal spans drawn with SDL_RenderDrawLine — the same
+/// primitives-only strategy `drawCircle` uses. Vertices are camera-transformed
+/// to screen space first.
+pub fn drawTriangle(v1: Vector2, v2: Vector2, v3: Vector2, tint: Color) void {
+    const r = sdl_renderer orelse return;
+    _ = c.SDL_SetRenderDrawColor(r, tint.r, tint.g, tint.b, tint.a);
+    fillTriangleScreen(
+        r,
+        transformX(v1.x),
+        transformY(v1.y),
+        transformX(v2.x),
+        transformY(v2.y),
+        transformX(v3.x),
+        transformY(v3.y),
+    );
+}
+
+/// Filled convex/simple polygon, fanned from `points[0]` through
+/// `drawTriangle` (matching the raylib backend's triangle-fan strategy).
+/// Fewer than 3 points is a no-op.
+pub fn drawPolygon(points: []const Vector2, tint: Color) void {
+    if (points.len < 3) return;
+    var i: usize = 1;
+    while (i + 1 < points.len) : (i += 1) {
+        drawTriangle(points[0], points[i], points[i + 1], tint);
+    }
+}
+
+/// Scanline-fill a triangle given its three screen-space vertices. For each
+/// pixel row it intersects the row centre with the 3 edges and fills the span
+/// between the extreme intersections. The `yc >= ymax` half-open test avoids
+/// double-counting shared vertices between adjacent rows.
+fn fillTriangleScreen(r: *c.SDL_Renderer, x0: f32, y0: f32, x1: f32, y1: f32, x2: f32, y2: f32) void {
+    const top_y: i32 = @intFromFloat(@floor(@min(y0, @min(y1, y2))));
+    const bot_y: i32 = @intFromFloat(@ceil(@max(y0, @max(y1, y2))));
+    var y: i32 = top_y;
+    while (y <= bot_y) : (y += 1) {
+        const yc: f32 = @as(f32, @floatFromInt(y)) + 0.5;
+        var xs: [3]f32 = undefined;
+        var count: usize = 0;
+        count = appendEdgeX(x0, y0, x1, y1, yc, &xs, count);
+        count = appendEdgeX(x1, y1, x2, y2, yc, &xs, count);
+        count = appendEdgeX(x2, y2, x0, y0, yc, &xs, count);
+        if (count < 2) continue;
+        var lo = xs[0];
+        var hi = xs[0];
+        for (xs[0..count]) |xv| {
+            lo = @min(lo, xv);
+            hi = @max(hi, xv);
+        }
+        _ = c.SDL_RenderDrawLine(r, @intFromFloat(lo), y, @intFromFloat(hi), y);
+    }
+}
+
+/// If the horizontal line `y = yc` crosses the edge (x0,y0)->(x1,y1), append the
+/// intersection's x to `xs` and return the new count; otherwise return `count`
+/// unchanged. Horizontal edges are skipped.
+fn appendEdgeX(x0: f32, y0: f32, x1: f32, y1: f32, yc: f32, xs: *[3]f32, count: usize) usize {
+    if (y0 == y1) return count; // horizontal edge contributes no crossing
+    const ymin = @min(y0, y1);
+    const ymax = @max(y0, y1);
+    if (yc < ymin or yc >= ymax) return count;
+    const t = (yc - y0) / (y1 - y0);
+    if (count < xs.len) xs[count] = x0 + t * (x1 - x0);
+    return count + 1;
 }
 
 pub fn drawLine(start_x: f32, start_y: f32, end_x: f32, end_y: f32, thickness: f32, tint: Color) void {

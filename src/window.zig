@@ -4,6 +4,14 @@ const audio = @import("audio");
 const gfx = @import("gfx");
 const input = @import("input");
 
+// Contract-version tag (labelle-assembler#453 item 1). The assembler emits a
+// directional `@compileError` version assert in the generated game's main.zig
+// comparing this against labelle-core's `WINDOW_CONTRACT_VERSION`. v1 is the
+// initial revision. This module satisfies the window contract's required
+// core (width/height/frameDuration/requestQuit) and is a loop-model backend
+// (it declares `shouldQuit`).
+pub const targets_window_contract: u32 = 1;
+
 pub const ConfigFlags = struct {
     window_hidden: bool = false,
 };

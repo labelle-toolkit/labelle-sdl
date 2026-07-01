@@ -9,6 +9,16 @@ const c = @cImport({
     @cInclude("SDL2/SDL_mixer.h");
 });
 
+// Contract-version tags (labelle-assembler#453 item 1). The assembler emits
+// directional `@compileError` version asserts in the generated game's main.zig
+// comparing these against labelle-core's `AUDIO_PLAYBACK_CONTRACT_VERSION` /
+// `AUDIO_LOADER_CONTRACT_VERSION`. v1 is the initial revision. This module
+// satisfies BOTH the playback surface (playSound/stopSound required, plus the
+// music + global optionals) and the loader surface (Mix_LoadWAV sound decode +
+// Mix_LoadMUS music load), both via SDL_mixer.
+pub const targets_audio_playback_contract: u32 = 1;
+pub const targets_audio_loader_contract: u32 = 1;
+
 const MAX_SOUNDS = 256;
 const MAX_MUSIC = 32;
 
