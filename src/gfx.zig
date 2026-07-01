@@ -490,6 +490,23 @@ pub fn drawTriangle(v1: Vector2, v2: Vector2, v3: Vector2, tint: Color) void {
 /// still drawn but may drop the excess crossings on affected rows.
 const MAX_POLY_CROSSINGS = 64;
 
+/// Convert a raw float scan bound to an `i32` pixel index, clamping into the
+/// `[0, hi]` range in FLOAT space *before* `@intFromFloat`.
+///
+/// `@intFromFloat` is safety-checked illegal behaviour when the value's integer
+/// part is out of range, so a far-off-screen vertex or extreme-zoom coordinate
+/// (a huge float, or NaN) would panic if converted first. Clamping in float
+/// space keeps the input inside `[0, hi]` before the conversion.
+///
+/// The `!(v >= 0.0)` / `!(v <= hi_f)` form is NaN-safe: every comparison with
+/// NaN is false, so `!(NaN >= 0.0)` is true and NaN maps to `0` rather than
+/// leaking through a naive `@max`/`@min` clamp.
+fn clampBoundToPixel(v: f32, hi: i32) i32 {
+    const hi_f: f32 = @floatFromInt(hi);
+    const clamped: f32 = if (!(v >= 0.0)) 0.0 else if (!(v <= hi_f)) hi_f else v;
+    return @intFromFloat(clamped);
+}
+
 /// Filled simple polygon (convex OR concave) via an even-odd scanline fill.
 ///
 /// A previous implementation fanned triangles from `points[0]`, which only
@@ -516,8 +533,8 @@ pub fn drawPolygon(points: []const Vector2, tint: Color) void {
         min_y = @min(min_y, sy);
         max_y = @max(max_y, sy);
     }
-    const top_y: i32 = @max(@as(i32, @intFromFloat(@floor(min_y))), 0);
-    const bot_y: i32 = @min(@as(i32, @intFromFloat(@ceil(max_y))), screen_h - 1);
+    const top_y: i32 = clampBoundToPixel(@floor(min_y), screen_h - 1);
+    const bot_y: i32 = clampBoundToPixel(@ceil(max_y), screen_h - 1);
     const max_x: f32 = @floatFromInt(screen_w - 1);
 
     var y: i32 = top_y;
@@ -563,8 +580,8 @@ fn fillTriangleScreen(r: *c.SDL_Renderer, x0: f32, y0: f32, x1: f32, y1: f32, x2
     // Clamp the scan range to the framebuffer so vertices far off-screen don't
     // walk hundreds of thousands of dead rows (SDL discards off-screen draws,
     // but the loop itself still runs).
-    const top_y: i32 = @max(@as(i32, @intFromFloat(@floor(@min(y0, @min(y1, y2))))), 0);
-    const bot_y: i32 = @min(@as(i32, @intFromFloat(@ceil(@max(y0, @max(y1, y2))))), screen_h - 1);
+    const top_y: i32 = clampBoundToPixel(@floor(@min(y0, @min(y1, y2))), screen_h - 1);
+    const bot_y: i32 = clampBoundToPixel(@ceil(@max(y0, @max(y1, y2))), screen_h - 1);
     const max_x: f32 = @floatFromInt(screen_w - 1);
     var y: i32 = top_y;
     while (y <= bot_y) : (y += 1) {
