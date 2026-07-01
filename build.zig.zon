@@ -20,6 +20,7 @@
         "build.zig.zon",
         "build_helpers.zig",
         "backend.manifest.zon",
+        "backend.manifest.v2.zon",
         "build_fragments",
         "templates",
         "src",
