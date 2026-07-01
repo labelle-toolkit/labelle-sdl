@@ -55,7 +55,7 @@
     // own window module (see the header note); the v1 link fragment is EMPTY.
 
     .platforms = .{
-        // Desktop-only. The generated main owns `while (!window.shouldQuit())`,
+        // Desktop-only. The generated main owns `while (!window.windowShouldClose())`,
         // so this is `.loop`, matching the v1 manifest's `loop_style = .loop`.
         .desktop = .{
             .entry = "templates/desktop.txt",
