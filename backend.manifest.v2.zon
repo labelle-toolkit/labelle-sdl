@@ -1,0 +1,71 @@
+.{
+    // ── sdl backend manifest, SCHEMA v2 (build-graph manifest, manifest-v2 epic
+    // labelle-assembler#461, Phase A cutover) — a faithful translation of this
+    // backend's v1 `backend.manifest.zon` + `build_fragments/{backend_dep,link}.txt`
+    // + `templates/desktop.txt`.
+    //
+    // The assembler's `generate` auto-detects this `backend.manifest.v2.zon` and
+    // builds via the declarative v2 path (no enum/fragment splice). The v1
+    // `backend.manifest.zon` is kept alongside it for the legacy path.
+    //
+    // sdl is a DESKTOP-ONLY backend (no wasm/android/ios templates — see the v1
+    // manifest's narrow capability set). It exercises the v2 codegen's
+    // FULLY-DECLARATIVE desktop path, and is HOOKLESS:
+    //   - NO `build_hook` — the generated build.zig imports no
+    //     `backend_build_hook.zig` and calls no `resolve_target`/`post_wire`.
+    //   - NO artifacts and NO system_libs on the CONSUMER side. This mirrors the
+    //     v1 `link.txt`, which is EMPTY (an "empty → nothing" link fragment).
+    //     SDL2 is NOT linked by the generated build.zig: the sdl backend package
+    //     links it INSIDE its own build.zig
+    //     (`window_mod.linkSystemLibrary("SDL2", .{})`, build.zig:119), and that
+    //     linkage propagates to the consumer exe automatically when the `window`
+    //     module is imported. So the v2 manifest declares no SDL2 system_lib —
+    //     adding one would emit a `linkSystemLibrary("SDL2")` the enum/v1 path
+    //     never emits, diverging from the real backend.
+    //   - The core-diamond override (`overrideImport(backend_input,
+    //     "labelle_core", core_mod)`, UNDERSCORE key per #258) is handled
+    //     generically by the assembler's core-diamond unification walk: rooted at
+    //     `backend_input`, the walk finds the `labelle_core` key and overrides it
+    //     onto the app `core_mod` — no per-backend override site.
+    .manifest_version = 2,
+    .dir_name = "sdl",
+    .dep_name = "labelle_sdl",
+    .id = "labelle.sdl",
+
+    // Carried forward UNCHANGED from the v1 manifest — sdl's ONE declared
+    // capability (SDL's native SDL_GameController polling). A non-empty set opts
+    // into resolve-time capability enforcement; v2 must not drop capability
+    // negotiation.
+    .capabilities = .{
+        .gamepad_polling,
+    },
+
+    // root_alias defaults to `backend_<name>`, so the generated root imports
+    // these as `backend_gfx`/`backend_input`/… exactly as the enum path does.
+    .modules = .{
+        .{ .name = "gfx", .source = "src/gfx.zig" },
+        .{ .name = "input", .source = "src/input.zig" },
+        .{ .name = "audio", .source = "src/audio.zig" },
+        .{ .name = "window", .source = "src/window.zig" },
+    },
+
+    // No dep_options: the sdl backend-dep takes no gamepad/gui/imgui toggles
+    // (`b.dependency("labelle_sdl", .{ .target, .optimize })`, backend_dep.txt).
+    // No system_libs / frameworks — SDL2 is linked inside the backend package's
+    // own window module (see the header note); the v1 link fragment is EMPTY.
+
+    .platforms = .{
+        // Desktop-only. The generated main owns `while (!window.windowShouldClose())`,
+        // so this is `.loop`, matching the v1 manifest's `loop_style = .loop`.
+        .desktop = .{
+            .entry = "templates/desktop.txt",
+            .loop_style = .loop,
+            .target = .native,
+            // No artifacts — SDL2 is linked by the backend package, not here.
+            .package = .binary,
+        },
+        // No android/ios/wasm — sdl is desktop-only.
+    },
+
+    // No build_hook — a fully declarative, HOOKLESS backend.
+}
