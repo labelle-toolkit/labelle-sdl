@@ -484,14 +484,74 @@ pub fn drawTriangle(v1: Vector2, v2: Vector2, v3: Vector2, tint: Color) void {
     );
 }
 
-/// Filled convex/simple polygon, fanned from `points[0]` through
-/// `drawTriangle` (matching the raylib backend's triangle-fan strategy).
-/// Fewer than 3 points is a no-op.
+/// Maximum number of edge crossings tracked per scanline in `drawPolygon`.
+/// A simple polygon can cross a horizontal line at most once per edge, so this
+/// caps the supported vertex count for a single fill. Polygons beyond this are
+/// still drawn but may drop the excess crossings on affected rows.
+const MAX_POLY_CROSSINGS = 64;
+
+/// Filled simple polygon (convex OR concave) via an even-odd scanline fill.
+///
+/// A previous implementation fanned triangles from `points[0]`, which only
+/// fills convex/star-shaped polygons correctly — concave polygons overfill
+/// outside the shape. This walks each scanline, collects every edge crossing,
+/// sorts them, and fills the spans between consecutive crossing PAIRS (the
+/// even-odd / non-zero-for-simple-polys rule), so concave outlines render
+/// correctly. Vertices are camera-transformed to screen space and the scan
+/// range is clamped to the framebuffer. Fewer than 3 points is a no-op.
+///
+/// Self-intersecting polygons follow the even-odd rule (interior of overlaps
+/// is left unfilled), consistent with a standard scanline rasteriser.
 pub fn drawPolygon(points: []const Vector2, tint: Color) void {
     if (points.len < 3) return;
-    var i: usize = 1;
-    while (i + 1 < points.len) : (i += 1) {
-        drawTriangle(points[0], points[i], points[i + 1], tint);
+    const r = sdl_renderer orelse return;
+    _ = c.SDL_SetRenderDrawColor(r, tint.r, tint.g, tint.b, tint.a);
+
+    // Screen-space Y bounds, clamped to the framebuffer so vertices far
+    // off-screen don't spin the scanline loop over hundreds of dead rows.
+    var min_y: f32 = std.math.floatMax(f32);
+    var max_y: f32 = -std.math.floatMax(f32);
+    for (points) |p| {
+        const sy = transformY(p.y);
+        min_y = @min(min_y, sy);
+        max_y = @max(max_y, sy);
+    }
+    const top_y: i32 = @max(@as(i32, @intFromFloat(@floor(min_y))), 0);
+    const bot_y: i32 = @min(@as(i32, @intFromFloat(@ceil(max_y))), screen_h - 1);
+    const max_x: f32 = @floatFromInt(screen_w - 1);
+
+    var y: i32 = top_y;
+    while (y <= bot_y) : (y += 1) {
+        const yc: f32 = @as(f32, @floatFromInt(y)) + 0.5;
+        var xs: [MAX_POLY_CROSSINGS]f32 = undefined;
+        var count: usize = 0;
+        var i: usize = 0;
+        while (i < points.len) : (i += 1) {
+            const a = points[i];
+            const b = points[(i + 1) % points.len];
+            const ax = transformX(a.x);
+            const ay = transformY(a.y);
+            const bx = transformX(b.x);
+            const by = transformY(b.y);
+            if (ay == by) continue; // horizontal edge contributes no crossing
+            const ymin = @min(ay, by);
+            const ymax = @max(ay, by);
+            if (yc < ymin or yc >= ymax) continue; // half-open avoids double-counting shared vertices
+            const t = (yc - ay) / (by - ay);
+            if (count < xs.len) {
+                xs[count] = ax + t * (bx - ax);
+                count += 1;
+            }
+        }
+        if (count < 2) continue;
+        std.mem.sort(f32, xs[0..count], {}, std.sort.asc(f32));
+        var k: usize = 0;
+        while (k + 1 < count) : (k += 2) {
+            const lo = @max(xs[k], 0);
+            const hi = @min(xs[k + 1], max_x);
+            if (hi < lo) continue; // span entirely off-screen
+            _ = c.SDL_RenderDrawLine(r, @intFromFloat(lo), y, @intFromFloat(hi), y);
+        }
     }
 }
 
@@ -500,8 +560,12 @@ pub fn drawPolygon(points: []const Vector2, tint: Color) void {
 /// between the extreme intersections. The `yc >= ymax` half-open test avoids
 /// double-counting shared vertices between adjacent rows.
 fn fillTriangleScreen(r: *c.SDL_Renderer, x0: f32, y0: f32, x1: f32, y1: f32, x2: f32, y2: f32) void {
-    const top_y: i32 = @intFromFloat(@floor(@min(y0, @min(y1, y2))));
-    const bot_y: i32 = @intFromFloat(@ceil(@max(y0, @max(y1, y2))));
+    // Clamp the scan range to the framebuffer so vertices far off-screen don't
+    // walk hundreds of thousands of dead rows (SDL discards off-screen draws,
+    // but the loop itself still runs).
+    const top_y: i32 = @max(@as(i32, @intFromFloat(@floor(@min(y0, @min(y1, y2))))), 0);
+    const bot_y: i32 = @min(@as(i32, @intFromFloat(@ceil(@max(y0, @max(y1, y2))))), screen_h - 1);
+    const max_x: f32 = @floatFromInt(screen_w - 1);
     var y: i32 = top_y;
     while (y <= bot_y) : (y += 1) {
         const yc: f32 = @as(f32, @floatFromInt(y)) + 0.5;
@@ -517,6 +581,9 @@ fn fillTriangleScreen(r: *c.SDL_Renderer, x0: f32, y0: f32, x1: f32, y1: f32, x2
             lo = @min(lo, xv);
             hi = @max(hi, xv);
         }
+        lo = @max(lo, 0);
+        hi = @min(hi, max_x);
+        if (hi < lo) continue; // span entirely off-screen
         _ = c.SDL_RenderDrawLine(r, @intFromFloat(lo), y, @intFromFloat(hi), y);
     }
 }
