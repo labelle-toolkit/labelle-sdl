@@ -82,6 +82,28 @@ pub fn setScreenSize(w: i32, h: i32) void {
     screen_h = h;
 }
 
+/// Re-sync the stored screen size to the renderer's ACTUAL output (drawable)
+/// area in physical pixels. The scanline clip bounds in `drawPolygon` /
+/// `fillTriangleScreen` are capped at `screen_w`/`screen_h`, which are otherwise
+/// only seeded once from `initWindow`. When the window goes fullscreen
+/// (`SDL_WINDOW_FULLSCREEN_DESKTOP` → desktop-resolution drawable) or is
+/// resized, that stored size goes stale and shapes drawn into the newly-exposed
+/// area get wrongly clipped. Callers (window.setFullscreen / resize events)
+/// invoke this so the bounds track the real framebuffer. No-op if the renderer
+/// is absent or the query fails. `SDL_GetRendererOutputSize` returns the true
+/// pixel dimensions the primitive draw calls address, so it is the correct clip
+/// extent even under HiDPI.
+pub fn refreshOutputSize() void {
+    const ren = sdl_renderer orelse return;
+    var w: c_int = 0;
+    var h: c_int = 0;
+    if (c.SDL_GetRendererOutputSize(ren, &w, &h) != 0) return;
+    if (w > 0 and h > 0) {
+        screen_w = @intCast(w);
+        screen_h = @intCast(h);
+    }
+}
+
 // ── Internal helpers ──────────────────────────────────────────────────
 
 fn getTexturePtr(id: u32) ?*c.SDL_Texture {
@@ -446,15 +468,27 @@ pub fn drawCircle(center_x: f32, center_y: f32, radius: f32, tint: Color) void {
     const cx: i32 = @intFromFloat(transformX(center_x));
     const cy: i32 = @intFromFloat(transformY(center_y));
     const rad: i32 = @intFromFloat(radius * cameraZoom());
-    // Midpoint circle fill
+    // Midpoint circle fill. Each visible row is drawn exactly once so that a
+    // translucent tint (a < 255) composites correctly under the renderer's
+    // global BLEND mode — the naive 4-span emit double-draws the middle row and
+    // the x == y octant boundary, which darkens those pixels when blended.
+    // Opaque (a == 255) fills are visually identical either way.
     var x: i32 = rad;
     var y: i32 = 0;
     var err: i32 = 1 - rad;
     while (x >= y) {
+        // Rows cy±y (span [-x, x]). The y == 0 case makes +y and -y the same
+        // row, so draw that middle row only once.
         _ = c.SDL_RenderDrawLine(r, cx - x, cy + y, cx + x, cy + y);
-        _ = c.SDL_RenderDrawLine(r, cx - x, cy - y, cx + x, cy - y);
-        _ = c.SDL_RenderDrawLine(r, cx - y, cy + x, cx + y, cy + x);
-        _ = c.SDL_RenderDrawLine(r, cx - y, cy - x, cx + y, cy - x);
+        if (y != 0)
+            _ = c.SDL_RenderDrawLine(r, cx - x, cy - y, cx + x, cy - y);
+        // Rows cy±x (span [-y, y]). At the x == y octant boundary these rows
+        // coincide with cy±y above and cover the same span, so skip them there
+        // to avoid re-drawing (and thus double-blending) identical pixels.
+        if (x != y) {
+            _ = c.SDL_RenderDrawLine(r, cx - y, cy + x, cx + y, cy + x);
+            _ = c.SDL_RenderDrawLine(r, cx - y, cy - x, cx + y, cy - x);
+        }
         y += 1;
         if (err < 0) {
             err += 2 * y + 1;

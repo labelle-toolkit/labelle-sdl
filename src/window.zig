@@ -138,6 +138,12 @@ pub fn setFullscreen(on: bool) void {
     if (isFullscreen() == on) return;
     const flags: u32 = if (on) c.SDL_WINDOW_FULLSCREEN_DESKTOP else 0;
     _ = c.SDL_SetWindowFullscreen(win, flags);
+    // The drawable area just changed (desktop resolution in fullscreen, window
+    // size back in windowed). Re-sync the stored screen size immediately so the
+    // scanline clip bounds in gfx.drawPolygon/fillTriangleScreen — and the
+    // window-contract width()/height() — reflect the new framebuffer this same
+    // frame, before any shapes are drawn into the expanded area.
+    gfx.refreshOutputSize();
 }
 
 pub fn setTargetFPS(fps: i32) void {
@@ -164,6 +170,14 @@ pub fn beginDrawing() void {
     while (c.SDL_PollEvent(&event) != 0) {
         if (event.type == c.SDL_QUIT) {
             should_close = true;
+        } else if (event.type == c.SDL_WINDOWEVENT and
+            (event.window.event == c.SDL_WINDOWEVENT_SIZE_CHANGED or
+                event.window.event == c.SDL_WINDOWEVENT_RESIZED))
+        {
+            // Drawable area changed (fullscreen transition, HiDPI, or a manual
+            // resize): keep the stored screen size current so gfx scanline clip
+            // bounds don't go stale and clip away legitimately on-screen shapes.
+            gfx.refreshOutputSize();
         }
         input.handleEvent(&event);
     }
