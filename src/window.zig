@@ -46,6 +46,13 @@ pub fn initWindow(width_px: i32, height_px: i32, title: [:0]const u8) void {
     );
     if (sdl_window) |win| {
         const renderer = c.SDL_CreateRenderer(win, -1, c.SDL_RENDERER_ACCELERATED | c.SDL_RENDERER_PRESENTVSYNC);
+        // Enable alpha blending for the renderer's primitive draw path so
+        // translucent fills (drawTriangle/drawPolygon/drawCircle/drawLine/
+        // drawRectangleRec with tint.a < 255) composite correctly. Without
+        // this SDL_RenderDrawLine/FillRect ignore alpha and render opaque.
+        // Textures set their own blend mode separately; blend-on is the
+        // expected default for 2D and does not regress opaque primitives.
+        if (renderer) |ren| _ = c.SDL_SetRenderDrawBlendMode(ren, c.SDL_BLENDMODE_BLEND);
         gfx.sdl_renderer = renderer;
         gfx.setScreenSize(width_px, height_px);
     }
@@ -131,6 +138,12 @@ pub fn setFullscreen(on: bool) void {
     if (isFullscreen() == on) return;
     const flags: u32 = if (on) c.SDL_WINDOW_FULLSCREEN_DESKTOP else 0;
     _ = c.SDL_SetWindowFullscreen(win, flags);
+    // The drawable area just changed (desktop resolution in fullscreen, window
+    // size back in windowed). Re-sync the stored screen size immediately so the
+    // scanline clip bounds in gfx.drawPolygon/fillTriangleScreen — and the
+    // window-contract width()/height() — reflect the new framebuffer this same
+    // frame, before any shapes are drawn into the expanded area.
+    gfx.refreshOutputSize();
 }
 
 pub fn setTargetFPS(fps: i32) void {
@@ -157,6 +170,14 @@ pub fn beginDrawing() void {
     while (c.SDL_PollEvent(&event) != 0) {
         if (event.type == c.SDL_QUIT) {
             should_close = true;
+        } else if (event.type == c.SDL_WINDOWEVENT and
+            (event.window.event == c.SDL_WINDOWEVENT_SIZE_CHANGED or
+                event.window.event == c.SDL_WINDOWEVENT_RESIZED))
+        {
+            // Drawable area changed (fullscreen transition, HiDPI, or a manual
+            // resize): keep the stored screen size current so gfx scanline clip
+            // bounds don't go stale and clip away legitimately on-screen shapes.
+            gfx.refreshOutputSize();
         }
         input.handleEvent(&event);
     }
