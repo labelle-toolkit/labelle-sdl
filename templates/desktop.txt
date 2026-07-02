@@ -21,7 +21,7 @@ const target_fps: u32 = {{fps}};
     g.setScreenHeight(@as(f32, @floatFromInt(screen_h)));
 
 {{preview_setup}}{{setup_code}}
-    while (!window.windowShouldClose()) {
+    while (!window.shouldQuit()) {
         const dt: f32 = 0.016;
         // Apply a pending fullscreen/windowed switch requested via
         // `game.setFullscreen`/`toggleFullscreen`. The engine owns the
@@ -39,11 +39,11 @@ const target_fps: u32 = {{fps}};
         }
 {{preview_heartbeat}}{{tick_code}}        g.tick(dt);
 
-        window.beginDrawing();
+        window.beginFrame();
         window.clearBackground(245, 245, 245, 255);
         g.render();
         g.renderGizmos();
 {{gui_draw_code}}        window.drawText(screen_title, 10, 10, 20, 80, 80, 80, 255);
-        window.endDrawing();
+        window.endFrame();
     }
 }
