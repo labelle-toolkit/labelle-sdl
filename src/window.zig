@@ -21,7 +21,7 @@ var should_close: bool = false;
 var target_fps_val: i32 = 60;
 var last_frame_time: u64 = 0;
 var frame_dur_last: u64 = 0; // baseline for the canonical frameDuration() dt source
-var frame_dur_seconds: f64 = 1.0 / 60.0; // cached per-frame dt; updated once per beginDrawing
+var frame_dur_seconds: f64 = 1.0 / 60.0; // cached per-frame dt; updated once per beginFrame
 var window_hidden: bool = false;
 
 pub fn setConfigFlags(flags: ConfigFlags) void {
@@ -73,18 +73,11 @@ pub fn closeWindow() void {
     sdl_window = null;
 }
 
-pub fn windowShouldClose() bool {
-    return should_close;
-}
-
 // ── Canonical window contract (labelle-core/src/window_contract.zig) ─────
 // The uniform window surface the pluggable-backends contract standardizes on
-// (labelle-assembler#386). SDL already exposes these values under its legacy
-// names (kept — the generated SDL run-loop templates still call them, so
-// generated output stays byte-identical); the decls below are the canonical
-// aliases/wrappers so the SDL backend satisfies `core.assertWindow`. SDL is a
-// *loop-style* backend (it owns `while (!windowShouldClose())`), so it also
-// declares `shouldQuit` — whose presence signals loop-ownership to the splice.
+// (labelle-assembler#386) — the SDL backend's only window surface. SDL is a
+// *loop-style* backend (it owns `while (!shouldQuit())`), so it declares
+// `shouldQuit` — whose presence signals loop-ownership to the splice.
 
 /// Current framebuffer width (physical px).
 pub fn width() i32 {
@@ -95,22 +88,23 @@ pub fn height() i32 {
     return gfx.getScreenHeight();
 }
 /// Seconds elapsed for the last frame — the engine's `dt` source. Returns the
-/// value cached by `beginDrawing` (computed once per frame), so this is
+/// value cached by `beginFrame` (computed once per frame), so this is
 /// idempotent: repeated calls within a frame all report the same dt. Seeded to
 /// 1/60 until the first frame completes; reset in `initWindow`.
 pub fn frameDuration() f64 {
     return frame_dur_seconds;
 }
 /// Ask the run loop to end. Latches the same `should_close` flag the `SDL_QUIT`
-/// event sets, which `windowShouldClose`/`shouldQuit` already report (no
-/// behavior change unless a script/engine calls this).
+/// event sets, which `shouldQuit` reports (no behavior change unless a
+/// script/engine calls this).
 pub fn requestQuit() void {
     should_close = true;
 }
-/// Canonical alias of `windowShouldClose`. Its presence marks SDL as a
+/// Whether the run loop should end. Reports the `should_close` flag latched by
+/// the `SDL_QUIT` event or `requestQuit`. Its presence marks SDL as a
 /// loop-model backend (`Window(Impl).ownsLoop()`).
 pub fn shouldQuit() bool {
-    return windowShouldClose();
+    return should_close;
 }
 
 /// Query whether the window is currently fullscreen. Mirrors the
@@ -150,7 +144,7 @@ pub fn setTargetFPS(fps: i32) void {
     target_fps_val = fps;
 }
 
-pub fn beginDrawing() void {
+pub fn beginFrame() void {
     // Compute this frame's dt ONCE here (the per-frame entry) and cache it, so
     // `frameDuration()` is idempotent — safe to query any number of times per
     // frame and always returns the same value. (Updating the baseline inside
@@ -184,7 +178,7 @@ pub fn beginDrawing() void {
     input.snapshotGamepads();
 }
 
-pub fn endDrawing() void {
+pub fn endFrame() void {
     if (gfx.sdl_renderer) |r| c.SDL_RenderPresent(r);
 
     // Frame timing

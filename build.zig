@@ -118,6 +118,29 @@ pub fn build(b: *std.Build) void {
     addSdlPaths(b, window_mod, sdl_prefix);
     window_mod.linkSystemLibrary("SDL2", .{});
     test_step.dependOn(&window_tests.step);
+
+    // ── labelle-core contract conformance self-check (#502) ─────────
+    // Test-only module that imports labelle-core and compile-proves this
+    // backend satisfies assertWindow/assertInput/assertBackend — the same
+    // gates the assembler emits into every generated main.zig. The shipped
+    // src/window.zig deliberately does NOT import labelle-core, so the module
+    // graph consumed by generated games stays untouched. Mirrors input_tests'
+    // SDL2 wiring so the behavioral runWindowSuite RUNS host-side.
+    const contract_check_mod = b.createModule(.{
+        .root_source_file = b.path("src/contract_check.zig"),
+        .target = target,
+        .optimize = optimize,
+        .imports = &.{
+            .{ .name = "labelle_core", .module = core_mod },
+            .{ .name = "window", .module = window_mod },
+            .{ .name = "input", .module = input_mod },
+            .{ .name = "gfx", .module = gfx_mod },
+        },
+    });
+    addSdlPaths(b, contract_check_mod, sdl_prefix);
+    contract_check_mod.linkSystemLibrary("SDL2", .{});
+    const contract_check = b.addTest(.{ .root_module = contract_check_mod });
+    test_step.dependOn(&b.addRunArtifact(contract_check).step);
 }
 
 fn addSdlPaths(b: *std.Build, mod: *std.Build.Module, prefix: []const u8) void {

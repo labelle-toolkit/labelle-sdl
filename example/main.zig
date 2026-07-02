@@ -295,7 +295,7 @@ fn update(dt: f32) void {
     // -- Escape to quit --
     if (input.isKeyPressed(c.SDL_SCANCODE_ESCAPE)) {
         // Signal quit by moving window state (no direct setShouldClose; we just exit)
-        // The windowShouldClose check already covers SDL_QUIT events.
+        // The shouldQuit check already covers SDL_QUIT events.
         // We can call closeWindow in the main loop exit path.
         return; // handled in main loop
     }
@@ -577,11 +577,11 @@ pub fn main() void {
     const dt: f32 = 1.0 / 60.0;
 
     // Main loop
-    while (!window.windowShouldClose()) {
+    while (!window.shouldQuit()) {
         // Check escape before/after input polling
         if (input.isKeyPressed(c.SDL_SCANCODE_ESCAPE)) break;
 
-        window.beginDrawing();
+        window.beginFrame();
         window.clearBackground(30, 30, 46, 255);
 
         // Update game state
@@ -595,7 +595,7 @@ pub fn main() void {
         // Screen-space HUD (not affected by camera)
         drawHUD();
 
-        window.endDrawing();
+        window.endFrame();
     }
 
     // Cleanup
