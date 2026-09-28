@@ -177,7 +177,7 @@ fn addSdlPaths(b: *std.Build, mod: *std.Build.Module, paths: SdlPaths) void {
         mod.addLibraryPath(.{ .cwd_relative = b.pathJoin(&.{ paths.prefix, "lib" }) });
     }
     if (paths.env) |e| {
-        mod.addIncludePath(.{ .cwd_relative = e.include });
+        if (e.include) |inc| mod.addIncludePath(.{ .cwd_relative = inc });
         mod.addLibraryPath(.{ .cwd_relative = e.lib });
     }
 }
