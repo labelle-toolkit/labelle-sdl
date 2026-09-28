@@ -30,3 +30,54 @@ jobs:
         run: brew install sdl2 sdl2_mixer
       - name: Build + test
         run: zig build test
+
+  # Windows: Zig has no default SDL2 search path for the MinGW (windows-gnu)
+  # toolchain, so this job only passes because build.zig honours
+  # LABELLE_SDL2_LIB (lib dir) and derives the sibling include dir from it.
+  # The prefix is laid out the way `labelle` provisions ~/.labelle/sdl2:
+  # the SDL2 (+ SDL2_mixer, for audio.zig's @cImport) MinGW devel packages
+  # merged into one x86_64-w64-mingw32 tree, the static archives hidden
+  # (Zig would otherwise pick libSDL2.a and need every Win32 system lib)
+  # and the DLLs copied into lib/ (Zig resolves `-lSDL2` to lib/SDL2.dll).
+  build-test-windows:
+    name: build + test (windows-latest, LABELLE_SDL2_LIB)
+    runs-on: windows-latest
+    timeout-minutes: 20
+    defaults:
+      run:
+        shell: bash
+    env:
+      SDL2_VERSION: 2.30.11
+      SDL2_SHA256: 0590db0a47b564aab92499ed03eaa75db9aee17c371080caa3b05df9d49d9ff9
+      SDL2_MIXER_VERSION: 2.8.0
+      SDL2_MIXER_SHA256: 4f426c9f0863707a1315333c7e41e0b56099fa412d26a27756ad8fa4ef0240ae
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: mlugg/setup-zig@v2
+        with:
+          version: 0.16.0
+      - name: Provision SDL2 + SDL2_mixer (MinGW devel)
+        run: |
+          set -euo pipefail
+          root="$RUNNER_TEMP/sdl2"
+          mkdir -p "$root"
+          cd "$root"
+          curl -sSfL -o sdl2.tar.gz "https://github.com/libsdl-org/SDL/releases/download/release-${SDL2_VERSION}/SDL2-devel-${SDL2_VERSION}-mingw.tar.gz"
+          curl -sSfL -o mixer.tar.gz "https://github.com/libsdl-org/SDL_mixer/releases/download/release-${SDL2_MIXER_VERSION}/SDL2_mixer-devel-${SDL2_MIXER_VERSION}-mingw.tar.gz"
+          echo "${SDL2_SHA256}  sdl2.tar.gz" | sha256sum -c -
+          echo "${SDL2_MIXER_SHA256}  mixer.tar.gz" | sha256sum -c -
+          tar xzf sdl2.tar.gz
+          tar xzf mixer.tar.gz
+          prefix="$root/SDL2-${SDL2_VERSION}/x86_64-w64-mingw32"
+          cp -r "$root/SDL2_mixer-${SDL2_MIXER_VERSION}/x86_64-w64-mingw32/." "$prefix/"
+          for a in libSDL2.a libSDL2main.a libSDL2_mixer.a; do
+            mv "$prefix/lib/$a" "$prefix/lib/$a.static-hidden"
+          done
+          cp "$prefix"/bin/*.dll "$prefix/lib/"
+          echo "LABELLE_SDL2_LIB=$(cygpath -w "$prefix/lib")" >> "$GITHUB_ENV"
+          # Runtime: the test binaries load SDL2.dll.
+          cygpath -w "$prefix/bin" >> "$GITHUB_PATH"
+      - name: Build + test
+        run: zig build test --summary all

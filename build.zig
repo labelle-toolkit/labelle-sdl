@@ -18,8 +18,25 @@ pub fn build(b: *std.Build) void {
     const sdl_prefix: []const u8 = b.option(
         []const u8,
         "sdl-prefix",
-        "SDL2 install prefix (auto-detected on macOS Homebrew, unused on Linux/Windows)",
+        "SDL2 install prefix (auto-detected on macOS Homebrew; on Windows set LABELLE_SDL2_LIB instead)",
     ) orelse helpers.detectSdlPrefix(target.result.os.tag, builtin.target.os.tag, dirExists);
+
+    // Windows: honour `LABELLE_SDL2_LIB` (the dir holding `libSDL2.dll.a`,
+    // e.g. the SDL2 MinGW devel package's `x86_64-w64-mingw32/lib` that
+    // `labelle` provisions) — same contract as labelle-bgfx / labelle-raylib.
+    // Its sibling `include` dir is added too, for the `@cImport`s. Applied
+    // on top of `-Dsdl-prefix`; ignored off Windows and when cross-compiling.
+    const env_paths = helpers.envSdlPaths(
+        b.allocator,
+        target.result.os.tag,
+        builtin.target.os.tag,
+        b.graph.environ_map.get("LABELLE_SDL2_LIB"),
+    ) catch @panic("OOM");
+    const sdl_paths: SdlPaths = .{
+        .prefix = sdl_prefix,
+        .env = env_paths,
+        .windows = target.result.os.tag == .windows,
+    };
 
     // Shared SDL2 C import module — ensures a single set of opaque types.
     // Only include/library *paths* are set here for @cImport resolution.
@@ -30,7 +47,7 @@ pub fn build(b: *std.Build) void {
         .target = target,
         .optimize = optimize,
     });
-    addSdlPaths(b, sdl_mod, sdl_prefix);
+    addSdlPaths(b, sdl_mod, sdl_paths);
 
     // labelle-core — frozen gamepad event contract types consumed by the
     // input backend (GamepadEvent / GamepadDescription, core#18).
@@ -63,7 +80,7 @@ pub fn build(b: *std.Build) void {
         .optimize = optimize,
     });
     audio_mod.addImport("sdl", sdl_mod);
-    addSdlPaths(b, audio_mod, sdl_prefix);
+    addSdlPaths(b, audio_mod, sdl_paths);
 
     // ── Window backend module ───────────────────────────────────────
     const window_mod = b.addModule("window", .{
@@ -101,7 +118,7 @@ pub fn build(b: *std.Build) void {
             },
         }),
     });
-    addSdlPaths(b, input_tests.root_module, sdl_prefix);
+    addSdlPaths(b, input_tests.root_module, sdl_paths);
     input_tests.root_module.linkSystemLibrary("SDL2", .{});
     test_step.dependOn(&b.addRunArtifact(input_tests).step);
 
@@ -115,7 +132,7 @@ pub fn build(b: *std.Build) void {
     // cross-compilation where the host can't execute the binary; SDL
     // include/lib paths are needed for the transitive @cInclude.
     const window_tests = b.addTest(.{ .root_module = window_mod });
-    addSdlPaths(b, window_mod, sdl_prefix);
+    addSdlPaths(b, window_mod, sdl_paths);
     window_mod.linkSystemLibrary("SDL2", .{});
     test_step.dependOn(&window_tests.step);
 
@@ -137,18 +154,32 @@ pub fn build(b: *std.Build) void {
             .{ .name = "gfx", .module = gfx_mod },
         },
     });
-    addSdlPaths(b, contract_check_mod, sdl_prefix);
+    addSdlPaths(b, contract_check_mod, sdl_paths);
     contract_check_mod.linkSystemLibrary("SDL2", .{});
     const contract_check = b.addTest(.{ .root_module = contract_check_mod });
     test_step.dependOn(&b.addRunArtifact(contract_check).step);
 }
 
-fn addSdlPaths(b: *std.Build, mod: *std.Build.Module, prefix: []const u8) void {
-    if (prefix.len == 0) return;
-    const include_path = b.pathJoin(&.{ prefix, "include" });
-    const lib_path = b.pathJoin(&.{ prefix, "lib" });
-    mod.addIncludePath(.{ .cwd_relative = include_path });
-    mod.addLibraryPath(.{ .cwd_relative = lib_path });
+const SdlPaths = struct {
+    /// `-Dsdl-prefix` / auto-detected Homebrew prefix ("" = system search).
+    prefix: []const u8,
+    /// From `LABELLE_SDL2_LIB` (Windows host + target only).
+    env: ?helpers.EnvSdlPaths,
+    /// Windows target: the SDL headers pull in C runtime headers
+    /// (`process.h`, ...) that Zig only exposes when the module links libc.
+    windows: bool,
+};
+
+fn addSdlPaths(b: *std.Build, mod: *std.Build.Module, paths: SdlPaths) void {
+    if (paths.windows) mod.link_libc = true;
+    if (paths.prefix.len != 0) {
+        mod.addIncludePath(.{ .cwd_relative = b.pathJoin(&.{ paths.prefix, "include" }) });
+        mod.addLibraryPath(.{ .cwd_relative = b.pathJoin(&.{ paths.prefix, "lib" }) });
+    }
+    if (paths.env) |e| {
+        mod.addIncludePath(.{ .cwd_relative = e.include });
+        mod.addLibraryPath(.{ .cwd_relative = e.lib });
+    }
 }
 
 fn dirExists(path: []const u8) bool {
