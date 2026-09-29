@@ -216,12 +216,14 @@ pub fn stageHook(r: Run) !void {
             std.debug.print("labelle-sdl2: no {s}; nothing to stage SDL2.dll beside\n", .{bin});
             return;
         },
+        .removed_stale => std.debug.print("labelle-sdl2: removed the SDL2.dll staged by an earlier build: the selected SDL2 has none (the game needs it on PATH)\n", .{}),
         .not_found => std.debug.print("labelle-sdl2: warning: no SDL2.dll to stage beside the exe (LABELLE_SDL2_LIB and the provider cache have none); the game needs it on PATH\n", .{}),
     }
     if (!fields.sdlRenderer()) return;
     switch (try stage.stageDll(r.a, r.io, bin, stage.mixer_dll_name, user_lib, cache_lib)) {
         .staged => |src| std.debug.print("labelle-sdl2: staged SDL2_mixer.dll next to the game exe (from {s})\n", .{src}),
         .up_to_date, .no_bin_dir => {},
+        .removed_stale => std.debug.print("labelle-sdl2: removed the SDL2_mixer.dll staged by an earlier build: LABELLE_SDL2_LIB has none now\n", .{}),
         .not_found => std.debug.print("labelle-sdl2: warning: no SDL2_mixer.dll beside LABELLE_SDL2_LIB (lib/ or ../bin) to stage; the sdl backend's audio needs it next to the exe or on PATH\n", .{}),
     }
 }
@@ -256,6 +258,7 @@ fn doctorCommand(r: Run, json: bool, fix: bool) !bool {
         .cache_lib = sdl2.installedLibDir(r.a, r.io, cache, r.release),
         .install_dir = try sdl2.installDir(r.a, cache, r.release),
         .offline = env.offline(r.environ),
+        .host_supported = r.release.mingw != null,
     }, json, describe(r.a, r.fields));
 }
 

@@ -60,6 +60,8 @@ pub const Inputs = struct {
     /// Where the next build would install it (Windows).
     install_dir: []const u8,
     offline: bool,
+    /// The SDL2 MinGW package has a build for this host's arch.
+    host_supported: bool = true,
 };
 
 const install_action = "labelle sdl2 install";
@@ -103,6 +105,11 @@ pub fn checkLib(a: std.mem.Allocator, p: Probe, in: Inputs) Item {
             }
             if (in.cache_lib) |dir| {
                 item.detail = std.fmt.allocPrint(a, "provider cache: {s}", .{dir}) catch dir;
+                return item;
+            }
+            if (!in.host_supported) {
+                item.ok = false;
+                item.hint = "unsupported host architecture: the SDL2 MinGW package ships x86_64 and i686 builds only; set LABELLE_SDL2_LIB to an SDL2 for this architecture";
                 return item;
             }
             return pending(a, base, in);
@@ -396,6 +403,11 @@ test "Windows: nothing installed is pending (ok) online, a failure offline" {
     try testing.expect(!lib.ok);
     try testing.expect(std.mem.indexOf(u8, lib.hint.?, "LABELLE_OFFLINE") != null);
     try testing.expect(!(try capability(a, testing.io, m.probe(), in)).ok);
+    // An ARM64 host has no package build: a failure, not "the next build".
+    in.offline = false;
+    in.host_supported = false;
+    lib = checkLib(a, m.probe(), in);
+    try testing.expect(!lib.ok and std.mem.indexOf(u8, lib.hint.?, "unsupported host architecture") != null);
 }
 
 test "Windows: the user's LABELLE_SDL2_LIB wins and is checked; the cache is next" {

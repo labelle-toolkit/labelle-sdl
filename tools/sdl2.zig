@@ -35,7 +35,20 @@ pub const Release = struct {
     sha256: []const u8,
     /// The package's root directory inside the archive.
     root: []const u8,
+    /// The package's MinGW subtree for the host's architecture, or null
+    /// when the package has none (`mingwTriple`).
+    mingw: ?[]const u8,
 };
+
+/// The MinGW subtree of the SDL2 dev package that matches `arch`: the
+/// package ships x86_64 and i686 builds only, so an ARM64 host has none.
+pub fn mingwTriple(arch: std.Target.Cpu.Arch) ?[]const u8 {
+    return switch (arch) {
+        .x86_64 => "x86_64-w64-mingw32",
+        .x86 => "i686-w64-mingw32",
+        else => null,
+    };
+}
 
 /// The release labelle-cli provisions (`SDL2_VERSION` in
 /// `sdl_provision.zig`), verified against the toolkit's Windows backends.
@@ -46,10 +59,9 @@ pub const pinned: Release = .{
         SDL2_VERSION ++ "/SDL2-devel-" ++ SDL2_VERSION ++ "-mingw.tar.gz",
     .sha256 = "0590db0a47b564aab92499ed03eaa75db9aee17c371080caa3b05df9d49d9ff9",
     .root = "SDL2-" ++ SDL2_VERSION,
+    .mingw = mingwTriple(builtin.cpu.arch),
 };
 
-/// The MinGW triple whose libs the toolkit's Windows builds link.
-pub const mingw = "x86_64-w64-mingw32";
 pub const import_lib = "libSDL2.dll.a";
 pub const dll_name = "SDL2.dll";
 
@@ -89,7 +101,8 @@ pub fn installDir(a: std.mem.Allocator, cache_dir: []const u8, release: Release)
 
 /// The directory `LABELLE_SDL2_LIB` names for an install: import lib + DLL.
 pub fn libDirOf(a: std.mem.Allocator, install: []const u8, release: Release) ![]const u8 {
-    return std.fs.path.join(a, &.{ install, release.root, mingw, "lib" });
+    const triple = release.mingw orelse return error.Sdl2UnsupportedHostArch;
+    return std.fs.path.join(a, &.{ install, release.root, triple, "lib" });
 }
 
 pub fn exists(io: std.Io, path: []const u8) bool {
@@ -98,13 +111,15 @@ pub fn exists(io: std.Io, path: []const u8) bool {
 }
 
 /// A complete install: the marker (written last, before the rename) and
-/// the two files the link and the launch need.
+/// the files the link, the `@cImport`s and the launch need. A damaged one
+/// is reinstalled by the next `ensure`.
 pub fn complete(a: std.mem.Allocator, io: std.Io, install: []const u8, release: Release) bool {
     const lib = libDirOf(a, install, release) catch return false;
     const marker = std.fs.path.join(a, &.{ install, marker_name }) catch return false;
     const implib = std.fs.path.join(a, &.{ lib, import_lib }) catch return false;
     const dll = std.fs.path.join(a, &.{ lib, dll_name }) catch return false;
-    return exists(io, marker) and exists(io, implib) and exists(io, dll);
+    const header = std.fs.path.join(a, &.{ lib, "..", "include", "SDL2", "SDL.h" }) catch return false;
+    return exists(io, marker) and exists(io, implib) and exists(io, dll) and exists(io, header);
 }
 
 /// The lib dir of a complete install of `release` in `cache_dir`, or null.
@@ -123,6 +138,10 @@ pub const EnsureOptions = struct {
 /// Returns its lib dir (the `LABELLE_SDL2_LIB` value).
 pub fn ensure(a: std.mem.Allocator, io: std.Io, fetcher: Fetcher, cache_dir: []const u8, release: Release, opts: EnsureOptions) ![]const u8 {
     const cwd = std.Io.Dir.cwd();
+    const triple = release.mingw orelse {
+        std.debug.print("labelle-sdl2: unsupported host architecture ({s}): the SDL2 MinGW package ships x86_64 and i686 builds only; set LABELLE_SDL2_LIB to an SDL2 for this architecture\n", .{@tagName(builtin.cpu.arch)});
+        return error.Sdl2UnsupportedHostArch;
+    };
     const dir = try installDir(a, cache_dir, release);
     if (complete(a, io, dir, release)) return libDirOf(a, dir, release);
     if (opts.offline) {
@@ -168,11 +187,12 @@ pub fn ensure(a: std.mem.Allocator, io: std.Io, fetcher: Fetcher, cache_dir: []c
     // fall back to the static libSDL2.a (which drags in many Win32 libs).
     // Copy the DLL into lib/ and drop the static archives.
     const lib = try libDirOf(a, staging, release);
-    const bin_dll = try std.fs.path.join(a, &.{ staging, release.root, mingw, "bin", dll_name });
+    const bin_dll = try std.fs.path.join(a, &.{ staging, release.root, triple, "bin", dll_name });
     const lib_dll = try std.fs.path.join(a, &.{ lib, dll_name });
     const implib = try std.fs.path.join(a, &.{ lib, import_lib });
-    if (!exists(io, bin_dll) or !exists(io, implib)) {
-        std.debug.print("labelle-sdl2: the SDL2 {s} package has an unexpected layout (no {s}/bin/{s} or lib/{s})\n", .{ release.version, mingw, dll_name, import_lib });
+    const header = try std.fs.path.join(a, &.{ lib, "..", "include", "SDL2", "SDL.h" });
+    if (!exists(io, bin_dll) or !exists(io, header) or !exists(io, implib)) {
+        std.debug.print("labelle-sdl2: the SDL2 {s} package has an unexpected layout (no {s}/bin/{s} or lib/{s})\n", .{ release.version, triple, dll_name, import_lib });
         return error.Sdl2UnexpectedLayout;
     }
     try cwd.copyFile(bin_dll, cwd, lib_dll, io, .{});
@@ -265,6 +285,7 @@ pub const Fake = struct {
             .url = "https://example.invalid/SDL2-devel-2.30.11-mingw.tar.gz",
             .sha256 = testing.allocator.dupe(u8, &hex) catch unreachable,
             .root = "SDL2-2.30.11",
+            .mingw = "x86_64-w64-mingw32",
         };
     }
 
@@ -284,7 +305,7 @@ pub const Fake = struct {
 
     fn extract(ctx: ?*anyopaque, io: std.Io, a: std.mem.Allocator, _: []const u8, dest: []const u8) anyerror!void {
         const self: *Fake = @ptrCast(@alignCast(ctx.?));
-        const base = try std.fs.path.join(a, &.{ dest, "SDL2-2.30.11", mingw });
+        const base = try std.fs.path.join(a, &.{ dest, "SDL2-2.30.11", "x86_64-w64-mingw32" });
         defer a.free(base);
         try touch(io, a, &.{ base, "lib", import_lib });
         try touch(io, a, &.{ base, "lib", "libSDL2.a" });
@@ -331,7 +352,42 @@ test "the install dir is keyed by layout, host and SDK identity" {
     const dir = try installDir(a, "/c", pinned);
     const want = try std.fs.path.join(a, &.{ "/c", "sdl2-v1", host_key, "2.30.11-0590db0a47b5" });
     try testing.expectEqualStrings(want, dir);
-    try testing.expect(std.mem.endsWith(u8, try libDirOf(a, dir, pinned), try std.fs.path.join(a, &.{ "SDL2-2.30.11", "x86_64-w64-mingw32", "lib" })));
+    var x64 = pinned;
+    x64.mingw = mingwTriple(.x86_64);
+    try testing.expect(std.mem.endsWith(u8, try libDirOf(a, dir, x64), try std.fs.path.join(a, &.{ "SDL2-2.30.11", "x86_64-w64-mingw32", "lib" })));
+}
+
+test "the MinGW subtree follows the host arch; an ARM64 host is refused, not given x86_64" {
+    try testing.expectEqualStrings("x86_64-w64-mingw32", mingwTriple(.x86_64).?);
+    try testing.expectEqualStrings("i686-w64-mingw32", mingwTriple(.x86).?);
+    try testing.expect(mingwTriple(.aarch64) == null);
+    var t = try Tmp.init();
+    defer t.deinit();
+    const a = t.arena.allocator();
+    var fake: Fake = .{};
+    var arm = fake.release();
+    defer testing.allocator.free(arm.sha256);
+    arm.mingw = null;
+    try testing.expectError(error.Sdl2UnsupportedHostArch, ensure(a, testing.io, fake.fetcher(), try t.path(&.{"cache"}), arm, .{}));
+    try testing.expectEqual(@as(usize, 0), fake.downloads);
+    try testing.expectError(error.Sdl2UnsupportedHostArch, libDirOf(a, "/c", arm));
+}
+
+test "a cached install that lost its headers is incomplete and reinstalled" {
+    var t = try Tmp.init();
+    defer t.deinit();
+    const a = t.arena.allocator();
+    const io = testing.io;
+    const cache = try t.path(&.{"cache"});
+    var fake: Fake = .{};
+    const release = fake.release();
+    defer testing.allocator.free(release.sha256);
+    const lib = try ensure(a, io, fake.fetcher(), cache, release, .{});
+    try std.Io.Dir.cwd().deleteFile(io, try std.fs.path.join(a, &.{ lib, "..", "include", "SDL2", "SDL.h" }));
+    try testing.expect(installedLibDir(a, io, cache, release) == null);
+    _ = try ensure(a, io, fake.fetcher(), cache, release, .{});
+    try testing.expectEqual(@as(usize, 2), fake.downloads);
+    try testing.expect(installedLibDir(a, io, cache, release) != null);
 }
 
 test "ensure installs once, arranges lib/ for the linker and leaves no staging" {

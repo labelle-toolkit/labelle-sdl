@@ -21,7 +21,10 @@ const std = @import("std");
 const sdl2 = @import("sdl2.zig");
 
 /// The SDL2_mixer runtime the `sdl` backend's audio links. Not provisioned:
-/// it comes with the user's `LABELLE_SDL2_LIB` package.
+/// it comes with the user's `LABELLE_SDL2_LIB` package. Only this one DLL
+/// is staged: the official SDL2_mixer MinGW package (2.8.0, the one the CI
+/// uses) ships `SDL2_mixer.dll` alone in `bin/`, its codecs built in, and
+/// copying "every DLL beside it" would sweep a whole MSYS2 `bin/`.
 pub const mixer_dll_name = "SDL2_mixer.dll";
 
 /// Locate the runtime DLL `name`, mirroring the linker's own resolution:
@@ -55,9 +58,20 @@ pub const Outcome = union(enum) {
     up_to_date,
     /// No `<target_dir>/zig-out/bin` (nothing was installed there).
     no_bin_dir,
-    /// The DLL could not be located.
+    /// The DLL could not be located (nothing of ours is left beside the exe).
     not_found,
+    /// The DLL could not be located, and the copy this provider staged by an
+    /// earlier build was removed so it cannot shadow PATH.
+    removed_stale,
 };
+
+/// `<bin>/.<name>.labelle-sdl2`: written beside every DLL this provider
+/// stages, so a later build removes only its own copy, never a DLL the
+/// user put there.
+fn markerPath(a: std.mem.Allocator, bin_dir: []const u8, name: []const u8) ![]const u8 {
+    const file = try std.fmt.allocPrint(a, ".{s}.labelle-sdl2", .{name});
+    return std.fs.path.join(a, &.{ bin_dir, file });
+}
 
 /// DLLs are a few MB; this is ample headroom.
 const max_dll_bytes = 256 * 1024 * 1024;
@@ -83,13 +97,26 @@ fn sameContents(a: std.mem.Allocator, io: std.Io, src: []const u8, dst: []const 
 pub fn stageDll(a: std.mem.Allocator, io: std.Io, bin_dir: []const u8, name: []const u8, lib_dir: ?[]const u8, cache_lib: ?[]const u8) !Outcome {
     if (!sdl2.exists(io, bin_dir)) return .no_bin_dir;
     const dst = try std.fs.path.join(a, &.{ bin_dir, name });
-    const src = locateDll(a, io, name, lib_dir, cache_lib) orelse return .not_found;
-    if (sameContents(a, io, src, dst)) return .up_to_date;
+    const marker = try markerPath(a, bin_dir, name);
     const cwd = std.Io.Dir.cwd();
+    const src = locateDll(a, io, name, lib_dir, cache_lib) orelse {
+        if (!sdl2.exists(io, marker)) return .not_found;
+        cwd.deleteFile(io, dst) catch |err| switch (err) {
+            error.FileNotFound => {},
+            else => {
+                std.debug.print("labelle-sdl2: could not remove the stale {s}: {s}\n", .{ dst, @errorName(err) });
+                return error.Sdl2StageFailed;
+            },
+        };
+        cwd.deleteFile(io, marker) catch {};
+        return .removed_stale;
+    };
+    if (sameContents(a, io, src, dst)) return .up_to_date;
     cwd.copyFile(src, cwd, dst, io, .{}) catch |err| {
         std.debug.print("labelle-sdl2: found {s} but could not copy it to {s}: {s}\n", .{ src, dst, @errorName(err) });
         return error.Sdl2StageFailed;
     };
+    try cwd.writeFile(io, .{ .sub_path = marker, .data = src });
     return .{ .staged = src };
 }
 
@@ -159,6 +186,11 @@ test "stageDll copies beside the exe, keeps an identical copy and replaces a sta
     try touch(io, a, &.{ bin, "game.exe" }, "exe");
     // No DLL anywhere: reported, not an error.
     try testing.expectEqual(Outcome.not_found, try stageDll(a, io, bin, sdl2.dll_name, null, null));
+    // A DLL the user put there (no marker) is never removed.
+    try touch(io, a, &.{ bin, "SDL2.dll" }, "user's own");
+    try testing.expectEqual(Outcome.not_found, try stageDll(a, io, bin, sdl2.dll_name, null, null));
+    try testing.expect(sdl2.exists(io, staged_path));
+    try std.Io.Dir.cwd().deleteFile(io, staged_path);
     // A user lib dir without the DLL: nothing staged, even with a cached one.
     const cache = try std.fs.path.join(a, &.{ root, "cache", "lib" });
     try touch(io, a, &.{ cache, "SDL2.dll" }, "cached dll");
@@ -177,4 +209,10 @@ test "stageDll copies beside the exe, keeps an identical copy and replaces a sta
     try touch(io, a, &.{ lib, "SDL2.dll" }, "a newer, larger dll");
     _ = (try stageDll(a, io, bin, sdl2.dll_name, lib, null)).staged;
     try testing.expectEqualStrings("a newer, larger dll", try std.Io.Dir.cwd().readFileAlloc(io, staged_path, a, .limited(64)));
+    // The selected SDK loses its DLL: our staged copy is removed (with its
+    // marker), so PATH is consulted again.
+    try std.Io.Dir.cwd().deleteFile(io, try std.fs.path.join(a, &.{ lib, "SDL2.dll" }));
+    try testing.expectEqual(Outcome.removed_stale, try stageDll(a, io, bin, sdl2.dll_name, lib, null));
+    try testing.expect(!sdl2.exists(io, staged_path));
+    try testing.expectEqual(Outcome.not_found, try stageDll(a, io, bin, sdl2.dll_name, lib, null));
 }
