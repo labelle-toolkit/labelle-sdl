@@ -27,14 +27,19 @@ pub const mixer_dll_name = "SDL2_mixer.dll";
 /// Locate the runtime DLL `name`, mirroring the linker's own resolution:
 ///   1. `<lib>/<name>`         (the provisioner puts SDL2.dll in lib/)
 ///   2. `<lib>/../bin/<name>`  (the upstream MinGW package layout)
-///   3. the provider cache's lib dir (`cache_lib`)
-/// where `<lib>` is `LABELLE_SDL2_LIB` as the build saw it.
+///   3. the provider cache's lib dir (`cache_lib`), only when no `<lib>`
+///      is active
+/// where `<lib>` is `LABELLE_SDL2_LIB` as the build saw it. With a `<lib>`
+/// the exe linked that package's import lib, so a cached DLL of another
+/// SDL2 release must not stand in for it: none found there is null (the
+/// runtime then comes from PATH).
 pub fn locateDll(a: std.mem.Allocator, io: std.Io, name: []const u8, lib_dir: ?[]const u8, cache_lib: ?[]const u8) ?[]const u8 {
     if (lib_dir) |lib| if (lib.len > 0) {
         const in_lib = std.fs.path.join(a, &.{ lib, name }) catch return null;
         if (sdl2.exists(io, in_lib)) return in_lib;
         const in_bin = std.fs.path.join(a, &.{ lib, "..", "bin", name }) catch return null;
         if (sdl2.exists(io, in_bin)) return in_bin;
+        return null;
     };
     if (cache_lib) |lib| {
         const p = std.fs.path.join(a, &.{ lib, name }) catch return null;
@@ -122,16 +127,18 @@ test "a DLL is found in lib/, then lib/../bin, then the provider cache" {
     try touch(io, a, &.{ root, "upstream", "bin", "SDL2_mixer.dll" }, "mixer");
     try testing.expect(std.mem.endsWith(u8, locateDll(a, io, sdl2.dll_name, upstream, null).?, "SDL2.dll"));
     try testing.expect(std.mem.endsWith(u8, locateDll(a, io, mixer_dll_name, upstream, null).?, "SDL2_mixer.dll"));
-    // Nothing at LABELLE_SDL2_LIB (or unset / empty): the cache.
+    // LABELLE_SDL2_LIB unset or empty: the cache.
     const cache = try std.fs.path.join(a, &.{ root, "cache", "lib" });
     try touch(io, a, &.{ cache, "SDL2.dll" }, "dll");
-    const empty = try std.fs.path.join(a, &.{ root, "empty" });
-    try testing.expectEqualStrings(try std.fs.path.join(a, &.{ cache, "SDL2.dll" }), locateDll(a, io, sdl2.dll_name, empty, cache).?);
-    try testing.expect(locateDll(a, io, sdl2.dll_name, null, cache) != null);
+    try testing.expectEqualStrings(try std.fs.path.join(a, &.{ cache, "SDL2.dll" }), locateDll(a, io, sdl2.dll_name, null, cache).?);
     try testing.expect(locateDll(a, io, sdl2.dll_name, "", cache) != null);
+    // An active LABELLE_SDL2_LIB without the DLL never falls back to the
+    // cache (another SDL2 release than the linked import lib).
+    const empty = try std.fs.path.join(a, &.{ root, "empty" });
+    try testing.expect(locateDll(a, io, sdl2.dll_name, empty, cache) == null);
     try testing.expect(locateDll(a, io, sdl2.dll_name, empty, null) == null);
     // The cache has no mixer.
-    try testing.expect(locateDll(a, io, mixer_dll_name, empty, cache) == null);
+    try testing.expect(locateDll(a, io, mixer_dll_name, null, cache) == null);
 }
 
 test "stageDll copies beside the exe, keeps an identical copy and replaces a stale one" {
@@ -152,6 +159,12 @@ test "stageDll copies beside the exe, keeps an identical copy and replaces a sta
     try touch(io, a, &.{ bin, "game.exe" }, "exe");
     // No DLL anywhere: reported, not an error.
     try testing.expectEqual(Outcome.not_found, try stageDll(a, io, bin, sdl2.dll_name, null, null));
+    // A user lib dir without the DLL: nothing staged, even with a cached one.
+    const cache = try std.fs.path.join(a, &.{ root, "cache", "lib" });
+    try touch(io, a, &.{ cache, "SDL2.dll" }, "cached dll");
+    const no_dll = try std.fs.path.join(a, &.{ root, "user-without-dll", "lib" });
+    try testing.expectEqual(Outcome.not_found, try stageDll(a, io, bin, sdl2.dll_name, no_dll, cache));
+    try testing.expect(!sdl2.exists(io, staged_path));
     const out = try stageDll(a, io, bin, sdl2.dll_name, lib, null);
     try testing.expectEqualStrings(try std.fs.path.join(a, &.{ lib, "SDL2.dll" }), out.staged);
     try testing.expectEqualStrings("the dll", try std.Io.Dir.cwd().readFileAlloc(io, staged_path, a, .limited(64)));

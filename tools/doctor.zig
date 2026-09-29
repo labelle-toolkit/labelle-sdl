@@ -160,15 +160,14 @@ pub fn checkHeaders(a: std.mem.Allocator, p: Probe, in: Inputs) Item {
     var item = base;
     switch (in.os) {
         .windows => {
-            for ([_]?[]const u8{ in.user_lib, in.cache_lib }) |maybe| {
-                const lib = maybe orelse continue;
-                const h = join(a, &.{ lib, "..", "include", "SDL2", "SDL.h" });
-                if (p.exists(p.ctx, h)) {
-                    item.detail = h;
-                    return item;
-                }
+            // The Windows build derives its include dir from
+            // LABELLE_SDL2_LIB alone, so with one set only it counts.
+            const lib = in.user_lib orelse in.cache_lib orelse return pending(a, base, in);
+            const h = join(a, &.{ lib, "..", "include", "SDL2", "SDL.h" });
+            if (p.exists(p.ctx, h)) {
+                item.detail = h;
+                return item;
             }
-            if (in.user_lib == null and in.cache_lib == null) return pending(a, base, in);
             item.ok = false;
             item.hint = "SDL2 headers not found. The `sdl` render backend needs the SDL2 dev headers (SDL2/SDL.h) from the MinGW dev package.";
         },
@@ -208,7 +207,18 @@ pub fn checkMixer(a: std.mem.Allocator, p: Probe, in: Inputs) Item {
         .windows => {
             if (in.user_lib) |dir| {
                 if (p.exists(p.ctx, join(a, &.{ dir, "libSDL2_mixer.dll.a" }))) {
-                    item.detail = dir;
+                    // Linkable; healthy only when the runtime is findable
+                    // too (what the stage hook copies, or PATH).
+                    const dll = firstExisting(p, &.{
+                        join(a, &.{ dir, stage.mixer_dll_name }),
+                        join(a, &.{ dir, "..", "bin", stage.mixer_dll_name }),
+                    }) orelse p.on_path(p.ctx, stage.mixer_dll_name);
+                    if (dll) |d| {
+                        item.detail = std.fmt.allocPrint(a, "{s} (runtime: {s})", .{ dir, d }) catch dir;
+                        return item;
+                    }
+                    item.ok = false;
+                    item.hint = "SDL2_mixer.dll not found (LABELLE_SDL2_LIB's lib/ or ../bin, or PATH): the sdl backend's audio needs it at runtime. Copy the SDL2_mixer MinGW package's bin/SDL2_mixer.dll beside SDL2.dll.";
                     return item;
                 }
             }
@@ -396,16 +406,27 @@ test "Windows: the user's LABELLE_SDL2_LIB wins and is checked; the cache is nex
     const implib = try std.fs.path.join(a, &.{ user, "libSDL2.dll.a" });
     const mixer = try std.fs.path.join(a, &.{ user, "libSDL2_mixer.dll.a" });
     const header = try std.fs.path.join(a, &.{ user, "..", "include", "SDL2", "SDL.h" });
-    var good: FakeMachine = .{ .files = &.{ implib, mixer, header } };
+    const mixer_dll = try std.fs.path.join(a, &.{ user, "..", "bin", "SDL2_mixer.dll" });
+    var good: FakeMachine = .{ .files = &.{ implib, mixer, header, mixer_dll } };
     var in = inputs(.windows, true);
     in.user_lib = user;
     try testing.expect(checkLib(a, good.probe(), in).ok);
     try testing.expect(checkMixer(a, good.probe(), in).ok);
     try testing.expect(checkHeaders(a, good.probe(), in).ok);
+    // The mixer import lib without its DLL is not healthy; PATH counts.
+    var no_mixer_dll: FakeMachine = .{ .files = &.{ implib, mixer, header } };
+    const m = checkMixer(a, no_mixer_dll.probe(), in);
+    try testing.expect(!m.ok and std.mem.indexOf(u8, m.hint.?, "SDL2_mixer.dll") != null);
+    var mixer_on_path: FakeMachine = .{ .files = &.{ implib, mixer }, .path_dll = "C:/bin/SDL2_mixer.dll" };
+    try testing.expect(checkMixer(a, mixer_on_path.probe(), in).ok);
     // A user value without the import lib is a failure, not a fallback.
     var bad: FakeMachine = .{};
     in.cache_lib = "C:/cache/lib";
     try testing.expect(!checkLib(a, bad.probe(), in).ok);
+    // Nor do the cache's headers stand in for the user's install.
+    const cache_header = try std.fs.path.join(a, &.{ "C:/cache/lib", "..", "include", "SDL2", "SDL.h" });
+    var cache_headers_only: FakeMachine = .{ .files = &.{cache_header} };
+    try testing.expect(!checkHeaders(a, cache_headers_only.probe(), in).ok);
     // Without a user value the cache answers, but it has no mixer.
     in.user_lib = null;
     const lib = checkLib(a, bad.probe(), in);
