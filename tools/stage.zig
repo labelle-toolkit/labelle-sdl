@@ -127,6 +127,7 @@ pub fn stageDll(a: std.mem.Allocator, io: std.Io, bin_dir: []const u8, name: []c
     const src = locateDll(a, io, name, lib_dir, cache_lib) orelse {
         if (!present) return .not_found;
         if (!ours) return if (staged != null) .user_owned else .not_found;
+        if (changedSince(a, io, dst, current)) return .user_owned;
         cwd.deleteFile(io, dst) catch |err| {
             std.debug.print("labelle-sdl2: could not remove the stale {s}: {s}\n", .{ dst, @errorName(err) });
             return error.Sdl2StageFailed;
@@ -139,13 +140,40 @@ pub fn stageDll(a: std.mem.Allocator, io: std.Io, bin_dir: []const u8, name: []c
     // the user's and stays unmarked (it is never claimed).
     if (eqlOpt(current, wanted)) return .up_to_date;
     if (present and !ours) return .user_owned;
+    if (present and changedSince(a, io, dst, current)) return .user_owned;
     cwd.copyFile(src, cwd, dst, io, .{}) catch |err| {
         std.debug.print("labelle-sdl2: found {s} but could not copy it to {s}: {s}\n", .{ src, dst, @errorName(err) });
         return error.Sdl2StageFailed;
     };
-    try cwd.writeFile(io, .{ .sub_path = marker, .data = wanted });
+    // Record what was actually published (the source may have changed
+    // since it was hashed), and never leave a published DLL unmarked: it
+    // would read as the user's from then on.
+    const published = digestOf(a, io, dst);
+    if (published == null or writeMarker(io, marker, published.?)) {
+        cwd.deleteFile(io, dst) catch {};
+        std.debug.print("labelle-sdl2: could not record the staged {s}; removed it\n", .{dst});
+        return error.Sdl2StageFailed;
+    }
     return .{ .staged = src };
 }
+
+/// Re-hash `dst` right before a destructive step: the user may have
+/// replaced it since ownership was decided. This narrows the window to the
+/// step itself; a concurrent edit landing between this check and the
+/// delete/rename is out of scope (a build hook doesn't race the user).
+fn changedSince(a: std.mem.Allocator, io: std.Io, dst: []const u8, seen: ?[]const u8) bool {
+    return !eqlOpt(digestOf(a, io, dst), seen);
+}
+
+/// Returns true on failure (so a caller can roll back).
+fn writeMarker(io: std.Io, marker: []const u8, record: []const u8) bool {
+    if (fail_marker_write_for_test) return true;
+    std.Io.Dir.cwd().writeFile(io, .{ .sub_path = marker, .data = record }) catch return true;
+    return false;
+}
+
+/// Test hook: make the marker write fail.
+var fail_marker_write_for_test = false;
 
 /// `<target_dir>/zig-out/bin`: where the desktop build installs the exe.
 pub fn binDir(a: std.mem.Allocator, target_dir: []const u8) ![]const u8 {
@@ -359,4 +387,49 @@ test "a destination that can't be read is never replaced or deleted" {
     try std.Io.Dir.cwd().deleteFile(io, try std.fs.path.join(a, &.{ lib, "SDL2.dll" }));
     try testing.expectEqual(Outcome.unreadable, try stageDll(a, io, bin, sdl2.dll_name, lib, null));
     try testing.expect(sdl2.exists(io, try std.fs.path.join(a, &.{ dst, "inside" })));
+}
+
+test "a DLL whose marker can't be written is not left published" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const io = testing.io;
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const root = try tmp.dir.realPathFileAlloc(io, ".", a);
+    const bin = try std.fs.path.join(a, &.{ root, "bin" });
+    const lib = try std.fs.path.join(a, &.{ root, "sdl", "lib" });
+    const dst = try std.fs.path.join(a, &.{ bin, "SDL2.dll" });
+    try touch(io, a, &.{ lib, "SDL2.dll" }, "provider dll");
+    try std.Io.Dir.cwd().createDirPath(io, bin);
+    fail_marker_write_for_test = true;
+    defer fail_marker_write_for_test = false;
+    try testing.expectError(error.Sdl2StageFailed, stageDll(a, io, bin, sdl2.dll_name, lib, null));
+    try testing.expect(!sdl2.exists(io, dst));
+    fail_marker_write_for_test = false;
+    // The next build stages it normally.
+    _ = (try stageDll(a, io, bin, sdl2.dll_name, lib, null)).staged;
+    try testing.expect(sdl2.exists(io, dst));
+}
+
+test "the marker records the published DLL's digest" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const io = testing.io;
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const root = try tmp.dir.realPathFileAlloc(io, ".", a);
+    const bin = try std.fs.path.join(a, &.{ root, "bin" });
+    const lib = try std.fs.path.join(a, &.{ root, "sdl", "lib" });
+    const dst = try std.fs.path.join(a, &.{ bin, "SDL2.dll" });
+    try touch(io, a, &.{ lib, "SDL2.dll" }, "provider dll");
+    try std.Io.Dir.cwd().createDirPath(io, bin);
+    _ = (try stageDll(a, io, bin, sdl2.dll_name, lib, null)).staged;
+    try testing.expectEqualStrings(digestOf(a, io, dst).?, recorded(a, io, try markerPath(a, bin, "SDL2.dll")).?);
+    // A changed-on-disk check sees a replacement made after ownership was read.
+    const seen = digestOf(a, io, dst);
+    try testing.expect(!changedSince(a, io, dst, seen));
+    try touch(io, a, &.{ bin, "SDL2.dll" }, "user swapped it in");
+    try testing.expect(changedSince(a, io, dst, seen));
 }
