@@ -123,7 +123,9 @@ pub fn stageDll(a: std.mem.Allocator, io: std.Io, bin_dir: []const u8, name: []c
     const ours = eqlOpt(staged, current);
     // A marker that no longer describes the destination (replaced, or the
     // DLL gone) proves nothing any more: drop it, whatever happens next.
-    if (staged != null and !ours) cwd.deleteFile(io, marker) catch {};
+    // Fail closed: a stale marker left behind could later claim a user DLL
+    // that happens to match its digest.
+    if (staged != null and !ours) try dropMarker(io, marker);
     const src = locateDll(a, io, name, lib_dir, cache_lib) orelse {
         if (!present) return .not_found;
         if (!ours) return if (staged != null) .user_owned else .not_found;
@@ -132,7 +134,7 @@ pub fn stageDll(a: std.mem.Allocator, io: std.Io, bin_dir: []const u8, name: []c
             std.debug.print("labelle-sdl2: could not remove the stale {s}: {s}\n", .{ dst, @errorName(err) });
             return error.Sdl2StageFailed;
         };
-        cwd.deleteFile(io, marker) catch {};
+        try dropMarker(io, marker);
         return .removed_stale;
     };
     const wanted = digestOf(a, io, src) orelse return error.Sdl2StageFailed;
@@ -141,8 +143,20 @@ pub fn stageDll(a: std.mem.Allocator, io: std.Io, bin_dir: []const u8, name: []c
     if (eqlOpt(current, wanted)) return .up_to_date;
     if (present and !ours) return .user_owned;
     if (present and changedSince(a, io, dst, current)) return .user_owned;
+    // Replacing our own earlier copy: keep it aside until the new copy and
+    // its marker are both committed, and put it back if either fails (its
+    // marker is untouched until then, so the pair stays consistent).
+    const backup = try std.fmt.allocPrint(a, "{s}.labelle-sdl2-old", .{dst});
+    if (present) {
+        cwd.deleteFile(io, backup) catch {};
+        cwd.rename(dst, cwd, backup, io) catch |err| {
+            std.debug.print("labelle-sdl2: could not set {s} aside to replace it: {s}\n", .{ dst, @errorName(err) });
+            return error.Sdl2StageFailed;
+        };
+    }
     cwd.copyFile(src, cwd, dst, io, .{}) catch |err| {
         std.debug.print("labelle-sdl2: found {s} but could not copy it to {s}: {s}\n", .{ src, dst, @errorName(err) });
+        restore(io, present, backup, dst);
         return error.Sdl2StageFailed;
     };
     // Record what was actually published (the source may have changed
@@ -150,17 +164,42 @@ pub fn stageDll(a: std.mem.Allocator, io: std.Io, bin_dir: []const u8, name: []c
     // would read as the user's from then on.
     const published = digestOf(a, io, dst);
     if (published == null or writeMarker(io, marker, published.?)) {
-        cwd.deleteFile(io, dst) catch {};
-        std.debug.print("labelle-sdl2: could not record the staged {s}; removed it\n", .{dst});
+        restore(io, present, backup, dst);
+        std.debug.print("labelle-sdl2: could not record the staged {s}; {s}\n", .{ dst, if (present) "kept the previous one" else "removed it" });
         return error.Sdl2StageFailed;
     }
+    if (present) cwd.deleteFile(io, backup) catch {};
     return .{ .staged = src };
+}
+
+/// Undo a failed publish: drop the new copy and, when one was set aside,
+/// put the previous DLL back.
+fn restore(io: std.Io, had_previous: bool, backup: []const u8, dst: []const u8) void {
+    const cwd = std.Io.Dir.cwd();
+    cwd.deleteFile(io, dst) catch {};
+    if (had_previous) cwd.rename(backup, cwd, dst, io) catch |err| {
+        std.debug.print("labelle-sdl2: could not restore {s} from {s}: {s}\n", .{ dst, backup, @errorName(err) });
+    };
+}
+
+/// Remove a marker, failing closed: only an absent one counts as removed.
+fn dropMarker(io: std.Io, marker: []const u8) !void {
+    if (fail_marker_delete_for_test) return error.Sdl2StageFailed;
+    std.Io.Dir.cwd().deleteFile(io, marker) catch |err| switch (err) {
+        error.FileNotFound => {},
+        else => {
+            std.debug.print("labelle-sdl2: could not remove the stale marker {s}: {s}\n", .{ marker, @errorName(err) });
+            return error.Sdl2StageFailed;
+        },
+    };
 }
 
 /// Re-hash `dst` right before a destructive step: the user may have
 /// replaced it since ownership was decided. This narrows the window to the
 /// step itself; a concurrent edit landing between this check and the
-/// delete/rename is out of scope (a build hook doesn't race the user).
+/// delete/rename is out of scope: a concurrent writer to `zig-out/bin`
+/// during the build hook (another process replacing the DLL mid-hook) is
+/// not guarded against; closing it would need OS file locking.
 fn changedSince(a: std.mem.Allocator, io: std.Io, dst: []const u8, seen: ?[]const u8) bool {
     return !eqlOpt(digestOf(a, io, dst), seen);
 }
@@ -172,8 +211,9 @@ fn writeMarker(io: std.Io, marker: []const u8, record: []const u8) bool {
     return false;
 }
 
-/// Test hook: make the marker write fail.
+/// Test hooks: make the marker write / removal fail.
 var fail_marker_write_for_test = false;
+var fail_marker_delete_for_test = false;
 
 /// `<target_dir>/zig-out/bin`: where the desktop build installs the exe.
 pub fn binDir(a: std.mem.Allocator, target_dir: []const u8) ![]const u8 {
@@ -432,4 +472,53 @@ test "the marker records the published DLL's digest" {
     try testing.expect(!changedSince(a, io, dst, seen));
     try touch(io, a, &.{ bin, "SDL2.dll" }, "user swapped it in");
     try testing.expect(changedSince(a, io, dst, seen));
+}
+
+test "replacing our DLL keeps the previous one when recording the new one fails" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const io = testing.io;
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const root = try tmp.dir.realPathFileAlloc(io, ".", a);
+    const bin = try std.fs.path.join(a, &.{ root, "bin" });
+    const lib = try std.fs.path.join(a, &.{ root, "sdl", "lib" });
+    const dst = try std.fs.path.join(a, &.{ bin, "SDL2.dll" });
+    try touch(io, a, &.{ lib, "SDL2.dll" }, "provider v1");
+    try std.Io.Dir.cwd().createDirPath(io, bin);
+    _ = (try stageDll(a, io, bin, sdl2.dll_name, lib, null)).staged;
+    try touch(io, a, &.{ lib, "SDL2.dll" }, "provider v2");
+    fail_marker_write_for_test = true;
+    defer fail_marker_write_for_test = false;
+    try testing.expectError(error.Sdl2StageFailed, stageDll(a, io, bin, sdl2.dll_name, lib, null));
+    // v1 is back, still ours (its marker untouched), and no backup is left.
+    try testing.expectEqualStrings("provider v1", try std.Io.Dir.cwd().readFileAlloc(io, dst, a, .limited(64)));
+    try testing.expectEqualStrings(digestOf(a, io, dst).?, recorded(a, io, try markerPath(a, bin, "SDL2.dll")).?);
+    try testing.expect(!sdl2.exists(io, try std.fmt.allocPrint(a, "{s}.labelle-sdl2-old", .{dst})));
+    // Once recording works, v2 replaces it and the backup is cleaned up.
+    fail_marker_write_for_test = false;
+    _ = (try stageDll(a, io, bin, sdl2.dll_name, lib, null)).staged;
+    try testing.expectEqualStrings("provider v2", try std.Io.Dir.cwd().readFileAlloc(io, dst, a, .limited(64)));
+    try testing.expect(!sdl2.exists(io, try std.fmt.allocPrint(a, "{s}.labelle-sdl2-old", .{dst})));
+}
+
+test "a stale marker that can't be removed fails the stage instead of lingering" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const io = testing.io;
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const root = try tmp.dir.realPathFileAlloc(io, ".", a);
+    const bin = try std.fs.path.join(a, &.{ root, "bin" });
+    const lib = try std.fs.path.join(a, &.{ root, "sdl", "lib" });
+    try touch(io, a, &.{ lib, "SDL2.dll" }, "provider dll");
+    try std.Io.Dir.cwd().createDirPath(io, bin);
+    _ = (try stageDll(a, io, bin, sdl2.dll_name, lib, null)).staged;
+    try touch(io, a, &.{ bin, "SDL2.dll" }, "user dll");
+    fail_marker_delete_for_test = true;
+    defer fail_marker_delete_for_test = false;
+    try testing.expectError(error.Sdl2StageFailed, stageDll(a, io, bin, sdl2.dll_name, lib, null));
+    try testing.expectEqualStrings("user dll", try std.Io.Dir.cwd().readFileAlloc(io, try std.fs.path.join(a, &.{ bin, "SDL2.dll" }), a, .limited(64)));
 }
