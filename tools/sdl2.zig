@@ -67,7 +67,7 @@ pub const Fetcher = struct {
 pub const system: Fetcher = .{ .download = systemDownload, .extract = systemExtract };
 
 fn systemDownload(_: ?*anyopaque, io: std.Io, a: std.mem.Allocator, url: []const u8, dest: []const u8) anyerror!void {
-    if (try proc.step(io, a, &.{ "curl", "-fSL", "--retry", "2", "-o", dest, url }) != 0) {
+    if (try proc.step(io, a, &.{ "curl", "-fsSL", "--retry", "2", "-o", dest, url }) != 0) {
         std.debug.print("labelle-sdl2: download failed (is curl on PATH?): {s}\n", .{url});
         return error.Sdl2DownloadFailed;
     }

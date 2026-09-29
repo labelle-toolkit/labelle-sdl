@@ -142,8 +142,18 @@ pub fn build(b: *std.Build) void {
     });
     test_step.dependOn(&b.addRunArtifact(helper_tests).step);
 
-    // The tests below import labelle-core (see `core_mod`).
-    const core = core_mod orelse return;
+    // The tests below import labelle-core (see `core_mod`). Without it in
+    // `--system` mode `test` must not pass having skipped them: it fails,
+    // naming the package. (`install-provider` / `test-provider` stay
+    // usable.) Outside `--system` a null here is the first configure pass;
+    // zig fetches the package and re-runs the build script.
+    const core = core_mod orelse {
+        if (b.graph.system_package_mode) test_step.dependOn(&b.addFail(
+            "labelle_core is not in the --system package directory: the input, window and " ++
+                "contract tests cannot run (fetch it, or run `zig build test-provider` for the provider tests only)",
+        ).step);
+        return;
+    };
 
     // ── Input backend unit tests (gamepad mapping/ring logic) ───────
     // Imports the same sdl + labelle-core modules and links SDL2 so the

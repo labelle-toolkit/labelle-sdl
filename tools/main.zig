@@ -200,17 +200,29 @@ pub fn envHook(r: Run) !void {
     std.debug.print("labelle-sdl2: using SDL2 {s} ({s})\n", .{ r.release.version, lib });
 }
 
-/// `after build`: SDL2.dll beside the exe on Windows.
+/// `after build`: SDL2.dll beside the exe on Windows, plus SDL2_mixer.dll
+/// for the `sdl` render backend (its audio links SDL2_mixer).
 pub fn stageHook(r: Run) !void {
     if (r.os != .windows) return;
-    if (!r.fields.?.needsSdl2()) return;
+    const fields = r.fields.?;
+    if (!fields.needsSdl2()) return;
     const bin = try stage.binDir(r.a, r.ctx.target_dir orelse return error.MissingTargetDir);
     const cache_lib = sdl2.installedLibDir(r.a, r.io, r.ctx.cache_dir.?, r.release);
-    switch (try stage.stageDll(r.a, r.io, bin, env.userLibDir(r.environ), cache_lib)) {
+    const user_lib = env.userLibDir(r.environ);
+    switch (try stage.stageDll(r.a, r.io, bin, sdl2.dll_name, user_lib, cache_lib)) {
         .staged => |src| std.debug.print("labelle-sdl2: staged SDL2.dll next to the game exe (from {s})\n", .{src}),
-        .already_there => {},
-        .no_bin_dir => std.debug.print("labelle-sdl2: no {s}; nothing to stage SDL2.dll beside\n", .{bin}),
+        .up_to_date => {},
+        .no_bin_dir => {
+            std.debug.print("labelle-sdl2: no {s}; nothing to stage SDL2.dll beside\n", .{bin});
+            return;
+        },
         .not_found => std.debug.print("labelle-sdl2: warning: no SDL2.dll to stage beside the exe (LABELLE_SDL2_LIB and the provider cache have none); the game needs it on PATH\n", .{}),
+    }
+    if (!fields.sdlRenderer()) return;
+    switch (try stage.stageDll(r.a, r.io, bin, stage.mixer_dll_name, user_lib, cache_lib)) {
+        .staged => |src| std.debug.print("labelle-sdl2: staged SDL2_mixer.dll next to the game exe (from {s})\n", .{src}),
+        .up_to_date, .no_bin_dir => {},
+        .not_found => std.debug.print("labelle-sdl2: warning: no SDL2_mixer.dll beside LABELLE_SDL2_LIB (lib/ or ../bin) to stage; the sdl backend's audio needs it next to the exe or on PATH\n", .{}),
     }
 }
 
@@ -452,6 +464,31 @@ test "stage hook: Windows copies the cached SDL2.dll beside the exe; elsewhere n
     try std.Io.Dir.cwd().deleteFile(testing.io, try std.fs.path.join(r.a, &.{ bin, "SDL2.dll" }));
     try stageHook(try f.run("stage", ".{ .backend = .sokol, .gamepad = .none }", .windows));
     try testing.expect(!sdl2.exists(testing.io, try std.fs.path.join(r.a, &.{ bin, "SDL2.dll" })));
+}
+
+test "stage hook: the sdl renderer also stages SDL2_mixer.dll from the package's bin; missing only warns" {
+    var f: HookFixture = undefined;
+    try f.init();
+    defer f.deinit();
+    const r = try f.run("stage", ".{ .backend = .sdl }", .windows);
+    const bin = try stage.binDir(r.a, r.ctx.target_dir.?);
+    try sdl2.Fake.touch(testing.io, r.a, &.{ bin, "game.exe" });
+    // The upstream MinGW layout: DLLs in the lib dir's sibling bin/.
+    const lib = try f.path(&.{ "mingw", "lib" });
+    try std.Io.Dir.cwd().createDirPath(testing.io, lib);
+    try sdl2.Fake.touch(testing.io, r.a, &.{ lib, "..", "bin", "SDL2.dll" });
+    try f.environ.put("LABELLE_SDL2_LIB", lib);
+    // No mixer yet: SDL2.dll is staged, the mixer only warned about.
+    try stageHook(r);
+    try testing.expect(sdl2.exists(testing.io, try std.fs.path.join(r.a, &.{ bin, "SDL2.dll" })));
+    try testing.expect(!sdl2.exists(testing.io, try std.fs.path.join(r.a, &.{ bin, "SDL2_mixer.dll" })));
+    try sdl2.Fake.touch(testing.io, r.a, &.{ lib, "..", "bin", "SDL2_mixer.dll" });
+    try stageHook(r);
+    try testing.expect(sdl2.exists(testing.io, try std.fs.path.join(r.a, &.{ bin, "SDL2_mixer.dll" })));
+    // A gamepad-only backend never stages the mixer.
+    try std.Io.Dir.cwd().deleteFile(testing.io, try std.fs.path.join(r.a, &.{ bin, "SDL2_mixer.dll" }));
+    try stageHook(try f.run("stage", ".{ .backend = .bgfx }", .windows));
+    try testing.expect(!sdl2.exists(testing.io, try std.fs.path.join(r.a, &.{ bin, "SDL2_mixer.dll" })));
 }
 
 test "stage hook: the build's LABELLE_SDL2_LIB is the DLL source" {

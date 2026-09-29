@@ -141,7 +141,7 @@ pub fn checkLib(a: std.mem.Allocator, p: Probe, in: Inputs) Item {
 pub fn checkDll(a: std.mem.Allocator, io: std.Io, p: Probe, in: Inputs) Item {
     const base: Item = .{ .id = "sdl2-dll", .name = "SDL2.dll for runtime", .ok = true };
     var item = base;
-    if (stage.locateDll(a, io, in.user_lib, in.cache_lib)) |dll| {
+    if (stage.locateDll(a, io, sdl2.dll_name, in.user_lib, in.cache_lib)) |dll| {
         item.detail = std.fmt.allocPrint(a, "{s} (staged beside the game exe after each desktop build)", .{dll}) catch dll;
         return item;
     }

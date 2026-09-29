@@ -1,59 +1,85 @@
 //! The `stage` hook (after build, desktop): copy the runtime `SDL2.dll`
-//! next to the freshly built game exe, ported from labelle-cli
-//! `stageSdl2DllBesideExe` (cli#285).
+//! (and, for the `sdl` render backend, `SDL2_mixer.dll`) next to the
+//! freshly built game exe, ported from labelle-cli `stageSdl2DllBesideExe`
+//! (cli#285).
 //!
 //! The Windows loader resolves a process's implicitly linked DLLs from the
 //! exe's own directory first. The build installs the exe into
-//! `<target_dir>/zig-out/bin/` but nothing puts `SDL2.dll` there, so the
+//! `<target_dir>/zig-out/bin/` but nothing puts the DLLs there, so the
 //! launch fails with a bare `FileNotFound`. PATH (the env hook's
 //! `path_prepend`) is consulted only after the exe's directory, never
 //! reaches the game the core `labelle run` launches, and a user-provided
 //! `LABELLE_SDL2_LIB` is not on PATH at all; a copy beside the exe covers
 //! every launch.
 //!
-//! The DLL is looked up where the build linked it from: the hook inherits
+//! The DLLs are looked up where the build linked from: the hook inherits
 //! the build's merged environment (contract §2 "Scope"), so its
 //! `LABELLE_SDL2_LIB` is the env hook's contribution or the user's value.
+//! A staged copy is replaced whenever it differs from that source (a
+//! switched SDL2 install, a new pin), so the exe never runs a stale DLL.
 const std = @import("std");
 const sdl2 = @import("sdl2.zig");
 
-/// Locate a runtime `SDL2.dll`, mirroring the linker's own resolution:
-///   1. `<lib>/SDL2.dll`         (the provisioner puts the DLL in lib/)
-///   2. `<lib>/../bin/SDL2.dll`  (the upstream MinGW package layout)
+/// The SDL2_mixer runtime the `sdl` backend's audio links. Not provisioned:
+/// it comes with the user's `LABELLE_SDL2_LIB` package.
+pub const mixer_dll_name = "SDL2_mixer.dll";
+
+/// Locate the runtime DLL `name`, mirroring the linker's own resolution:
+///   1. `<lib>/<name>`         (the provisioner puts SDL2.dll in lib/)
+///   2. `<lib>/../bin/<name>`  (the upstream MinGW package layout)
 ///   3. the provider cache's lib dir (`cache_lib`)
 /// where `<lib>` is `LABELLE_SDL2_LIB` as the build saw it.
-pub fn locateDll(a: std.mem.Allocator, io: std.Io, lib_dir: ?[]const u8, cache_lib: ?[]const u8) ?[]const u8 {
+pub fn locateDll(a: std.mem.Allocator, io: std.Io, name: []const u8, lib_dir: ?[]const u8, cache_lib: ?[]const u8) ?[]const u8 {
     if (lib_dir) |lib| if (lib.len > 0) {
-        const in_lib = std.fs.path.join(a, &.{ lib, sdl2.dll_name }) catch return null;
+        const in_lib = std.fs.path.join(a, &.{ lib, name }) catch return null;
         if (sdl2.exists(io, in_lib)) return in_lib;
-        const in_bin = std.fs.path.join(a, &.{ lib, "..", "bin", sdl2.dll_name }) catch return null;
+        const in_bin = std.fs.path.join(a, &.{ lib, "..", "bin", name }) catch return null;
         if (sdl2.exists(io, in_bin)) return in_bin;
     };
     if (cache_lib) |lib| {
-        const p = std.fs.path.join(a, &.{ lib, sdl2.dll_name }) catch return null;
+        const p = std.fs.path.join(a, &.{ lib, name }) catch return null;
         if (sdl2.exists(io, p)) return p;
     }
     return null;
 }
 
 pub const Outcome = union(enum) {
-    /// Copied from this source.
+    /// Copied (new or replaced) from this source.
     staged: []const u8,
-    /// A DLL is already beside the exe; left in place.
-    already_there,
+    /// The DLL beside the exe already equals the source.
+    up_to_date,
     /// No `<target_dir>/zig-out/bin` (nothing was installed there).
     no_bin_dir,
-    /// No SDL2.dll could be located.
+    /// The DLL could not be located.
     not_found,
 };
 
-/// Stage `SDL2.dll` into `bin_dir`. A copy that fails after a DLL was
-/// located is an error: the exe beside it would not start.
-pub fn stageDll(a: std.mem.Allocator, io: std.Io, bin_dir: []const u8, lib_dir: ?[]const u8, cache_lib: ?[]const u8) !Outcome {
+/// DLLs are a few MB; this is ample headroom.
+const max_dll_bytes = 256 * 1024 * 1024;
+
+/// True when `dst` exists with exactly `src`'s bytes (size first, then
+/// contents).
+fn sameContents(a: std.mem.Allocator, io: std.Io, src: []const u8, dst: []const u8) bool {
+    const cwd = std.Io.Dir.cwd();
+    const src_stat = cwd.statFile(io, src, .{}) catch return false;
+    const dst_stat = cwd.statFile(io, dst, .{}) catch return false;
+    if (src_stat.size != dst_stat.size) return false;
+    const x = cwd.readFileAlloc(io, src, a, .limited(max_dll_bytes)) catch return false;
+    defer a.free(x);
+    const y = cwd.readFileAlloc(io, dst, a, .limited(max_dll_bytes)) catch return false;
+    defer a.free(y);
+    return std.mem.eql(u8, x, y);
+}
+
+/// Stage the DLL `name` into `bin_dir`, replacing a copy that differs from
+/// the source (atomically: `copyFile` renames a complete temporary file
+/// over it). A copy that fails after the DLL was located is an error: the
+/// exe beside it would not start.
+pub fn stageDll(a: std.mem.Allocator, io: std.Io, bin_dir: []const u8, name: []const u8, lib_dir: ?[]const u8, cache_lib: ?[]const u8) !Outcome {
     if (!sdl2.exists(io, bin_dir)) return .no_bin_dir;
-    const dst = try std.fs.path.join(a, &.{ bin_dir, sdl2.dll_name });
-    if (sdl2.exists(io, dst)) return .already_there;
-    const src = locateDll(a, io, lib_dir, cache_lib) orelse return .not_found;
+    const dst = try std.fs.path.join(a, &.{ bin_dir, name });
+    const src = locateDll(a, io, name, lib_dir, cache_lib) orelse return .not_found;
+    if (sameContents(a, io, src, dst)) return .up_to_date;
     const cwd = std.Io.Dir.cwd();
     cwd.copyFile(src, cwd, dst, io, .{}) catch |err| {
         std.debug.print("labelle-sdl2: found {s} but could not copy it to {s}: {s}\n", .{ src, dst, @errorName(err) });
@@ -77,7 +103,7 @@ fn touch(io: std.Io, a: std.mem.Allocator, parts: []const []const u8, data: []co
     try std.Io.Dir.cwd().writeFile(io, .{ .sub_path = path, .data = data });
 }
 
-test "the DLL is found in lib/, then lib/../bin, then the provider cache" {
+test "a DLL is found in lib/, then lib/../bin, then the provider cache" {
     var arena = std.heap.ArenaAllocator.init(testing.allocator);
     defer arena.deinit();
     const a = arena.allocator();
@@ -88,23 +114,27 @@ test "the DLL is found in lib/, then lib/../bin, then the provider cache" {
     // A contributed install whose lib/ holds the DLL.
     const contributed = try std.fs.path.join(a, &.{ root, "contributed", "lib" });
     try touch(io, a, &.{ contributed, "SDL2.dll" }, "dll");
-    try testing.expectEqualStrings(try std.fs.path.join(a, &.{ contributed, "SDL2.dll" }), locateDll(a, io, contributed, null).?);
-    // The upstream layout: lib/../bin/SDL2.dll.
+    try testing.expectEqualStrings(try std.fs.path.join(a, &.{ contributed, "SDL2.dll" }), locateDll(a, io, sdl2.dll_name, contributed, null).?);
+    // The upstream layout: lib/../bin/<name>, for SDL2 and SDL2_mixer alike.
     const upstream = try std.fs.path.join(a, &.{ root, "upstream", "lib" });
     try std.Io.Dir.cwd().createDirPath(io, upstream);
     try touch(io, a, &.{ root, "upstream", "bin", "SDL2.dll" }, "dll");
-    try testing.expect(std.mem.endsWith(u8, locateDll(a, io, upstream, null).?, "SDL2.dll"));
+    try touch(io, a, &.{ root, "upstream", "bin", "SDL2_mixer.dll" }, "mixer");
+    try testing.expect(std.mem.endsWith(u8, locateDll(a, io, sdl2.dll_name, upstream, null).?, "SDL2.dll"));
+    try testing.expect(std.mem.endsWith(u8, locateDll(a, io, mixer_dll_name, upstream, null).?, "SDL2_mixer.dll"));
     // Nothing at LABELLE_SDL2_LIB (or unset / empty): the cache.
     const cache = try std.fs.path.join(a, &.{ root, "cache", "lib" });
     try touch(io, a, &.{ cache, "SDL2.dll" }, "dll");
     const empty = try std.fs.path.join(a, &.{ root, "empty" });
-    try testing.expectEqualStrings(try std.fs.path.join(a, &.{ cache, "SDL2.dll" }), locateDll(a, io, empty, cache).?);
-    try testing.expect(locateDll(a, io, null, cache) != null);
-    try testing.expect(locateDll(a, io, "", cache) != null);
-    try testing.expect(locateDll(a, io, empty, null) == null);
+    try testing.expectEqualStrings(try std.fs.path.join(a, &.{ cache, "SDL2.dll" }), locateDll(a, io, sdl2.dll_name, empty, cache).?);
+    try testing.expect(locateDll(a, io, sdl2.dll_name, null, cache) != null);
+    try testing.expect(locateDll(a, io, sdl2.dll_name, "", cache) != null);
+    try testing.expect(locateDll(a, io, sdl2.dll_name, empty, null) == null);
+    // The cache has no mixer.
+    try testing.expect(locateDll(a, io, mixer_dll_name, empty, cache) == null);
 }
 
-test "stageDll copies beside the exe once and never overwrites a staged DLL" {
+test "stageDll copies beside the exe, keeps an identical copy and replaces a stale one" {
     var arena = std.heap.ArenaAllocator.init(testing.allocator);
     defer arena.deinit();
     const a = arena.allocator();
@@ -115,17 +145,23 @@ test "stageDll copies beside the exe once and never overwrites a staged DLL" {
     const target_dir = try std.fs.path.join(a, &.{ root, ".labelle", "bgfx_desktop" });
     const bin = try binDir(a, target_dir);
     const lib = try std.fs.path.join(a, &.{ root, "sdl", "lib" });
+    const staged_path = try std.fs.path.join(a, &.{ bin, "SDL2.dll" });
     try touch(io, a, &.{ lib, "SDL2.dll" }, "the dll");
     // No bin dir yet: nothing to stage into.
-    try testing.expectEqual(Outcome.no_bin_dir, try stageDll(a, io, bin, lib, null));
+    try testing.expectEqual(Outcome.no_bin_dir, try stageDll(a, io, bin, sdl2.dll_name, lib, null));
     try touch(io, a, &.{ bin, "game.exe" }, "exe");
     // No DLL anywhere: reported, not an error.
-    try testing.expectEqual(Outcome.not_found, try stageDll(a, io, bin, null, null));
-    const out = try stageDll(a, io, bin, lib, null);
+    try testing.expectEqual(Outcome.not_found, try stageDll(a, io, bin, sdl2.dll_name, null, null));
+    const out = try stageDll(a, io, bin, sdl2.dll_name, lib, null);
     try testing.expectEqualStrings(try std.fs.path.join(a, &.{ lib, "SDL2.dll" }), out.staged);
-    const staged = try std.Io.Dir.cwd().readFileAlloc(io, try std.fs.path.join(a, &.{ bin, "SDL2.dll" }), a, .limited(64));
-    try testing.expectEqualStrings("the dll", staged);
-    // Already there: left in place, even if the source changed.
-    try touch(io, a, &.{ lib, "SDL2.dll" }, "a newer dll");
-    try testing.expectEqual(Outcome.already_there, try stageDll(a, io, bin, lib, null));
+    try testing.expectEqualStrings("the dll", try std.Io.Dir.cwd().readFileAlloc(io, staged_path, a, .limited(64)));
+    // Identical: left alone.
+    try testing.expectEqual(Outcome.up_to_date, try stageDll(a, io, bin, sdl2.dll_name, lib, null));
+    // The source changed (same size, other bytes; then another size): replaced.
+    try touch(io, a, &.{ lib, "SDL2.dll" }, "THE DLL");
+    _ = (try stageDll(a, io, bin, sdl2.dll_name, lib, null)).staged;
+    try testing.expectEqualStrings("THE DLL", try std.Io.Dir.cwd().readFileAlloc(io, staged_path, a, .limited(64)));
+    try touch(io, a, &.{ lib, "SDL2.dll" }, "a newer, larger dll");
+    _ = (try stageDll(a, io, bin, sdl2.dll_name, lib, null)).staged;
+    try testing.expectEqualStrings("a newer, larger dll", try std.Io.Dir.cwd().readFileAlloc(io, staged_path, a, .limited(64)));
 }
