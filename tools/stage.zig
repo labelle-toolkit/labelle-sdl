@@ -63,11 +63,15 @@ pub const Outcome = union(enum) {
     /// The DLL could not be located, and the copy this provider staged by an
     /// earlier build was removed so it cannot shadow PATH.
     removed_stale,
+    /// The DLL beside the exe is not the one this provider staged (the user
+    /// put or replaced it): left alone.
+    user_owned,
 };
 
 /// `<bin>/.<name>.labelle-sdl2`: written beside every DLL this provider
-/// stages, so a later build removes only its own copy, never a DLL the
-/// user put there.
+/// stages, recording the staged content (`<size> <sha256>`), so a later
+/// build replaces or removes only a copy that is still exactly what it
+/// staged — never a DLL the user put there or replaced.
 fn markerPath(a: std.mem.Allocator, bin_dir: []const u8, name: []const u8) ![]const u8 {
     const file = try std.fmt.allocPrint(a, ".{s}.labelle-sdl2", .{name});
     return std.fs.path.join(a, &.{ bin_dir, file });
@@ -76,47 +80,66 @@ fn markerPath(a: std.mem.Allocator, bin_dir: []const u8, name: []const u8) ![]co
 /// DLLs are a few MB; this is ample headroom.
 const max_dll_bytes = 256 * 1024 * 1024;
 
-/// True when `dst` exists with exactly `src`'s bytes (size first, then
-/// contents).
-fn sameContents(a: std.mem.Allocator, io: std.Io, src: []const u8, dst: []const u8) bool {
-    const cwd = std.Io.Dir.cwd();
-    const src_stat = cwd.statFile(io, src, .{}) catch return false;
-    const dst_stat = cwd.statFile(io, dst, .{}) catch return false;
-    if (src_stat.size != dst_stat.size) return false;
-    const x = cwd.readFileAlloc(io, src, a, .limited(max_dll_bytes)) catch return false;
-    defer a.free(x);
-    const y = cwd.readFileAlloc(io, dst, a, .limited(max_dll_bytes)) catch return false;
-    defer a.free(y);
-    return std.mem.eql(u8, x, y);
+/// The identity of `path` (`<size> <sha256>`), or null when it can't be read.
+fn digestOf(a: std.mem.Allocator, io: std.Io, path: []const u8) ?[]const u8 {
+    const bytes = std.Io.Dir.cwd().readFileAlloc(io, path, a, .limited(max_dll_bytes)) catch return null;
+    defer a.free(bytes);
+    var sum: [32]u8 = undefined;
+    std.crypto.hash.sha2.Sha256.hash(bytes, &sum, .{});
+    return std.fmt.allocPrint(a, "{d} {s}", .{ bytes.len, &std.fmt.bytesToHex(sum, .lower) }) catch null;
 }
 
-/// Stage the DLL `name` into `bin_dir`, replacing a copy that differs from
-/// the source (atomically: `copyFile` renames a complete temporary file
-/// over it). A copy that fails after the DLL was located is an error: the
-/// exe beside it would not start.
+/// What the marker says was staged, or null (absent, or an older format).
+fn recorded(a: std.mem.Allocator, io: std.Io, marker: []const u8) ?[]const u8 {
+    const bytes = std.Io.Dir.cwd().readFileAlloc(io, marker, a, .limited(256)) catch return null;
+    return std.mem.trim(u8, bytes, " \t\r\n");
+}
+
+fn eqlOpt(x: ?[]const u8, y: ?[]const u8) bool {
+    return x != null and y != null and std.mem.eql(u8, x.?, y.?);
+}
+
+/// Stage the DLL `name` into `bin_dir`. A destination is only ever
+/// replaced or removed while it still matches what the marker recorded;
+/// otherwise it is the user's and stays. Copies are atomic (`copyFile`
+/// renames a complete temporary file over it). A copy that fails after the
+/// DLL was located is an error: the exe beside it would not start.
 pub fn stageDll(a: std.mem.Allocator, io: std.Io, bin_dir: []const u8, name: []const u8, lib_dir: ?[]const u8, cache_lib: ?[]const u8) !Outcome {
     if (!sdl2.exists(io, bin_dir)) return .no_bin_dir;
     const dst = try std.fs.path.join(a, &.{ bin_dir, name });
     const marker = try markerPath(a, bin_dir, name);
     const cwd = std.Io.Dir.cwd();
+    const staged = recorded(a, io, marker);
+    const current = if (sdl2.exists(io, dst)) digestOf(a, io, dst) else null;
+    const ours = eqlOpt(staged, current);
     const src = locateDll(a, io, name, lib_dir, cache_lib) orelse {
-        if (!sdl2.exists(io, marker)) return .not_found;
-        cwd.deleteFile(io, dst) catch |err| switch (err) {
-            error.FileNotFound => {},
-            else => {
-                std.debug.print("labelle-sdl2: could not remove the stale {s}: {s}\n", .{ dst, @errorName(err) });
-                return error.Sdl2StageFailed;
-            },
+        if (current == null) {
+            cwd.deleteFile(io, marker) catch {};
+            return .not_found;
+        }
+        if (!ours) {
+            if (staged != null) cwd.deleteFile(io, marker) catch {};
+            return if (staged != null) .user_owned else .not_found;
+        }
+        cwd.deleteFile(io, dst) catch |err| {
+            std.debug.print("labelle-sdl2: could not remove the stale {s}: {s}\n", .{ dst, @errorName(err) });
+            return error.Sdl2StageFailed;
         };
         cwd.deleteFile(io, marker) catch {};
         return .removed_stale;
     };
-    if (sameContents(a, io, src, dst)) return .up_to_date;
+    const wanted = digestOf(a, io, src) orelse return error.Sdl2StageFailed;
+    if (eqlOpt(current, wanted)) {
+        // Equal to the source: record it (a copy this build would have made).
+        if (!eqlOpt(staged, wanted)) try cwd.writeFile(io, .{ .sub_path = marker, .data = wanted });
+        return .up_to_date;
+    }
+    if (current != null and !ours) return .user_owned;
     cwd.copyFile(src, cwd, dst, io, .{}) catch |err| {
         std.debug.print("labelle-sdl2: found {s} but could not copy it to {s}: {s}\n", .{ src, dst, @errorName(err) });
         return error.Sdl2StageFailed;
     };
-    try cwd.writeFile(io, .{ .sub_path = marker, .data = src });
+    try cwd.writeFile(io, .{ .sub_path = marker, .data = wanted });
     return .{ .staged = src };
 }
 
@@ -215,4 +238,42 @@ test "stageDll copies beside the exe, keeps an identical copy and replaces a sta
     try testing.expectEqual(Outcome.removed_stale, try stageDll(a, io, bin, sdl2.dll_name, lib, null));
     try testing.expect(!sdl2.exists(io, staged_path));
     try testing.expectEqual(Outcome.not_found, try stageDll(a, io, bin, sdl2.dll_name, lib, null));
+}
+
+test "a staged DLL the user replaced is neither overwritten nor deleted" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const io = testing.io;
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const root = try tmp.dir.realPathFileAlloc(io, ".", a);
+    const bin = try std.fs.path.join(a, &.{ root, "bin" });
+    const lib = try std.fs.path.join(a, &.{ root, "sdl", "lib" });
+    const dst = try std.fs.path.join(a, &.{ bin, "SDL2.dll" });
+    const marker = try markerPath(a, bin, "SDL2.dll");
+    try touch(io, a, &.{ bin, "game.exe" }, "exe");
+    try touch(io, a, &.{ lib, "SDL2.dll" }, "provider dll");
+    _ = (try stageDll(a, io, bin, sdl2.dll_name, lib, null)).staged;
+    // The marker records the staged size and SHA-256.
+    const rec = try std.Io.Dir.cwd().readFileAlloc(io, marker, a, .limited(256));
+    try testing.expect(std.mem.startsWith(u8, rec, "12 "));
+    try testing.expectEqual(@as(usize, 3 + 64), rec.len);
+    // The user swaps in their own build: a changed source doesn't overwrite it.
+    try touch(io, a, &.{ bin, "SDL2.dll" }, "user's patched dll");
+    try touch(io, a, &.{ lib, "SDL2.dll" }, "provider dll v2");
+    try testing.expectEqual(Outcome.user_owned, try stageDll(a, io, bin, sdl2.dll_name, lib, null));
+    try testing.expectEqualStrings("user's patched dll", try std.Io.Dir.cwd().readFileAlloc(io, dst, a, .limited(64)));
+    // Nor does a vanished source delete it; the marker no longer applies.
+    try std.Io.Dir.cwd().deleteFile(io, try std.fs.path.join(a, &.{ lib, "SDL2.dll" }));
+    try testing.expectEqual(Outcome.user_owned, try stageDll(a, io, bin, sdl2.dll_name, lib, null));
+    try testing.expect(sdl2.exists(io, dst));
+    try testing.expect(!sdl2.exists(io, marker));
+    try testing.expectEqual(Outcome.not_found, try stageDll(a, io, bin, sdl2.dll_name, lib, null));
+    try testing.expect(sdl2.exists(io, dst));
+    // An older-format marker (the source path) proves nothing: left alone.
+    try touch(io, a, &.{ lib, "SDL2.dll" }, "provider dll v3");
+    try std.Io.Dir.cwd().writeFile(io, .{ .sub_path = marker, .data = "C:/old/lib/SDL2.dll" });
+    try testing.expectEqual(Outcome.user_owned, try stageDll(a, io, bin, sdl2.dll_name, lib, null));
+    try testing.expectEqualStrings("user's patched dll", try std.Io.Dir.cwd().readFileAlloc(io, dst, a, .limited(64)));
 }
