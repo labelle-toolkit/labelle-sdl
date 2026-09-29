@@ -30,6 +30,13 @@ jobs:
         run: brew install sdl2 sdl2_mixer
       - name: Build + test
         run: zig build test
+      # The CLI builds the `sdl2` provider tool with `--system`, which never
+      # fetches: it must build from an empty package dir (plugin.labelle).
+      - name: Provider tool builds without fetching
+        run: |
+          mkdir -p "$RUNNER_TEMP/no-packages"
+          zig build install-provider --prefix "$RUNNER_TEMP/provider" --system "$RUNNER_TEMP/no-packages"
+          test -x "$RUNNER_TEMP/provider/bin/labelle-sdl2"
 
   # Windows: Zig has no default SDL2 search path for the MinGW (windows-gnu)
   # toolchain, so this job only passes because build.zig honours

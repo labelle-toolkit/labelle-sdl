@@ -6,6 +6,50 @@ pub fn build(b: *std.Build) void {
     const target = b.standardTargetOptions(.{});
     const optimize = b.standardOptimizeOption(.{});
 
+    // ── The `sdl2` provider (plugin.labelle, RFC labelle-cli#471 S1) ─────
+    // Declared FIRST and dependency-free: the CLI builds it with
+    // `zig build install-provider --system <zig-cache>/p`, which never
+    // fetches, so nothing below may be required to reach these steps.
+    //
+    // `labelle_sdl2` is the module the assembler imports for a `.plugins`
+    // entry named `sdl2` (`labelle_<name>`); it is empty.
+    _ = b.addModule("labelle_sdl2", .{
+        .root_source_file = b.path("src/sdl2_provider.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    // `bin/labelle-sdl2`, the one executable every command/hook names.
+    // Always built for the host, whatever `-Dtarget` says; std only.
+    const provider_module = b.createModule(.{
+        .root_source_file = b.path("tools/main.zig"),
+        .target = b.graph.host,
+        .optimize = optimize,
+    });
+    // `tools/main.zig`'s test checks its routing table against the manifest.
+    provider_module.addAnonymousImport("plugin.labelle", .{ .root_source_file = b.path("plugin.labelle") });
+    const provider = b.addExecutable(.{ .name = "labelle-sdl2", .root_module = provider_module });
+    b.step("install-provider", "Install the labelle-cli sdl2 provider tool (bin/labelle-sdl2)")
+        .dependOn(&b.addInstallArtifact(provider, .{}).step);
+    const provider_tests = b.addRunArtifact(b.addTest(.{ .root_module = provider_module }));
+    b.step("test-provider", "Run the sdl2 provider host-tool tests (wire contract, needs-SDL2, cache, staging, doctor)")
+        .dependOn(&provider_tests.step);
+    const test_step = b.step("test", "Run SDL backend build-helper tests and the provider tests");
+    test_step.dependOn(&provider_tests.step);
+
+    // labelle-core — frozen gamepad event contract types consumed by the
+    // input backend (GamepadEvent / GamepadDescription, core#18). Lazy, so
+    // the provider build above never needs it: under `--system` an absent
+    // package is skipped rather than requested (a request fails the whole
+    // `--system` build). A normal build that lacks it gets null on the
+    // first configure pass and is re-run once zig fetched it, so the modules
+    // below are still declared (a consumer's `.module("gfx")` must resolve)
+    // and only the core-importing wiring waits for it.
+    const core_mod: ?*std.Build.Module = blk: {
+        if (b.graph.system_package_mode and !lazyDepFetched(b, "labelle_core")) break :blk null;
+        const dep = b.lazyDependency("labelle_core", .{ .target = target, .optimize = optimize }) orelse break :blk null;
+        break :blk dep.module("labelle-core");
+    };
+
     // SDL2 install prefix. On Linux and Windows, SDL2 headers and
     // libraries live in system-wide paths that Zig finds automatically;
     // no prefix is needed. On macOS, SDL2 is typically installed via
@@ -49,11 +93,6 @@ pub fn build(b: *std.Build) void {
     });
     addSdlPaths(b, sdl_mod, sdl_paths);
 
-    // labelle-core — frozen gamepad event contract types consumed by the
-    // input backend (GamepadEvent / GamepadDescription, core#18).
-    const core_dep = b.dependency("labelle_core", .{ .target = target, .optimize = optimize });
-    const core_mod = core_dep.module("labelle-core");
-
     // ── Gfx backend module ──────────────────────────────────────────
     const gfx_mod = b.addModule("gfx", .{
         .root_source_file = b.path("src/gfx.zig"),
@@ -69,7 +108,7 @@ pub fn build(b: *std.Build) void {
         .optimize = optimize,
     });
     input_mod.addImport("sdl", sdl_mod);
-    input_mod.addImport("labelle_core", core_mod);
+    if (core_mod) |core| input_mod.addImport("labelle_core", core);
 
     // ── Audio backend module ────────────────────────────────────────
     // audio.zig has its own @cImport for SDL_mixer, so it needs the
@@ -101,8 +140,20 @@ pub fn build(b: *std.Build) void {
             .optimize = optimize,
         }),
     });
-    const test_step = b.step("test", "Run SDL backend build-helper tests");
     test_step.dependOn(&b.addRunArtifact(helper_tests).step);
+
+    // The tests below import labelle-core (see `core_mod`). Without it in
+    // `--system` mode `test` must not pass having skipped them: it fails,
+    // naming the package. (`install-provider` / `test-provider` stay
+    // usable.) Outside `--system` a null here is the first configure pass;
+    // zig fetches the package and re-runs the build script.
+    const core = core_mod orelse {
+        if (b.graph.system_package_mode) test_step.dependOn(&b.addFail(
+            "labelle_core is not in the --system package directory: the input, window and " ++
+                "contract tests cannot run (fetch it, or run `zig build test-provider` for the provider tests only)",
+        ).step);
+        return;
+    };
 
     // ── Input backend unit tests (gamepad mapping/ring logic) ───────
     // Imports the same sdl + labelle-core modules and links SDL2 so the
@@ -114,7 +165,7 @@ pub fn build(b: *std.Build) void {
             .optimize = optimize,
             .imports = &.{
                 .{ .name = "sdl", .module = sdl_mod },
-                .{ .name = "labelle_core", .module = core_mod },
+                .{ .name = "labelle_core", .module = core },
             },
         }),
     });
@@ -148,7 +199,7 @@ pub fn build(b: *std.Build) void {
         .target = target,
         .optimize = optimize,
         .imports = &.{
-            .{ .name = "labelle_core", .module = core_mod },
+            .{ .name = "labelle_core", .module = core },
             .{ .name = "window", .module = window_mod },
             .{ .name = "input", .module = input_mod },
             .{ .name = "gfx", .module = gfx_mod },
@@ -180,6 +231,23 @@ fn addSdlPaths(b: *std.Build, mod: *std.Build.Module, paths: SdlPaths) void {
         if (e.include) |inc| mod.addIncludePath(.{ .cwd_relative = inc });
         mod.addLibraryPath(.{ .cwd_relative = e.lib });
     }
+}
+
+/// Whether the lazy dependency `name` is already on disk, without marking
+/// it needed (which `b.lazyDependency` does, and which fails a `--system`
+/// build). The same availability test `std.Build.lazyDependency` makes.
+fn lazyDepFetched(b: *std.Build, name: []const u8) bool {
+    const deps = @import("root").dependencies;
+    const hash = for (b.available_deps) |dep| {
+        if (std.mem.eql(u8, dep[0], name)) break dep[1];
+    } else return false;
+    inline for (@typeInfo(deps.packages).@"struct".decls) |decl| {
+        if (std.mem.eql(u8, decl.name, hash)) {
+            const pkg = @field(deps.packages, decl.name);
+            return !@hasDecl(pkg, "available") or pkg.available;
+        }
+    }
+    return false;
 }
 
 fn dirExists(path: []const u8) bool {

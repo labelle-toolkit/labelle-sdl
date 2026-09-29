@@ -1,0 +1,40 @@
+// labelle-sdl's second face: the `sdl2` provider (labelle-cli provider
+// contract 1.3 to 1.5, RFC labelle-cli#471 S1 / D2). It takes over the SDL2
+// provisioning, DLL staging and doctor rows labelle-cli did in
+// `sdl_provision.zig`, for every desktop project whose backend links SDL2:
+// the `sdl` renderer, and raylib / sokol / bgfx for their gamepad source.
+//
+// Opt-in: declare it in `.plugins` next to any backend (this package is
+// also the `sdl` backend, via `backend.manifest*.zon` — a separate role; the
+// assembler stages the plugin copy as `.labelle/deps/labelle-sdl2`, module
+// `labelle_sdl2`, and never reads this file for the backend):
+//
+//   .plugins = .{ .{ .name = "sdl2", .repo = "github.com/labelle-toolkit/labelle-sdl", .version = "<v>" } },
+//
+// `.name = "sdl2"` because the assembler derives a plugin's module alias as
+// `labelle_<name>` (`build.zig` exports `labelle_sdl2`), and the CLI requires
+// the `.plugins` entry and the registry package to use this name.
+//
+// It declares no targets: `desktop` is core-owned; the hooks only attach to it.
+// Every entry runs the one host tool `bin/labelle-sdl2` (`tools/main.zig`,
+// built by `zig build install-provider`, std only). `command_contract`
+// admits exactly the wires its strict decoder (`tools/contract.zig`, vendored
+// via labelle-web) and `tools/main.zig` `wireAccepted` handle; 1.3 is the
+// floor (`cache_dir`, `env_file`).
+//   - `env` before `generate`: on a Windows host, provision SDL2 into the
+//     provider cache and contribute `LABELLE_SDL2_LIB`; a no-op elsewhere;
+//   - `stage` after `build`: copy `SDL2.dll` next to the built exe (Windows).
+.{
+    .name = "sdl2",
+    .manifest_version = 2,
+    .command_contract = ">=1.3.0 <1.6.0",
+    .namespace = "sdl2",
+    .commands = .{
+        .{ .name = "doctor", .build_step = "install-provider", .executable = "bin/labelle-sdl2", .help = "Check SDL2: library, runtime DLL, headers, mixer (--json, --fix)", .needs_project = false },
+        .{ .name = "install", .build_step = "install-provider", .executable = "bin/labelle-sdl2", .help = "Provision SDL2 into the provider cache now (Windows; prints the package-manager command elsewhere)", .needs_project = false },
+    },
+    .hooks = .{
+        .{ .id = "env", .step = .generate, .target = "desktop", .when = .before, .build_step = "install-provider", .executable = "bin/labelle-sdl2" },
+        .{ .id = "stage", .step = .build, .target = "desktop", .when = .after, .build_step = "install-provider", .executable = "bin/labelle-sdl2" },
+    },
+}
