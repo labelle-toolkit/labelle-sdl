@@ -225,6 +225,7 @@ pub fn stageHook(r: Run) !void {
         },
         .removed_stale => std.debug.print("labelle-sdl2: removed the SDL2.dll staged by an earlier build: the selected SDL2 has none (the game needs it on PATH)\n", .{}),
         .user_owned => std.debug.print("labelle-sdl2: warning: {s} is not the SDL2.dll this provider staged (replaced by hand?); left as is\n", .{bin}),
+        .unreadable => {},
         .not_found => std.debug.print("labelle-sdl2: warning: no SDL2.dll to stage beside the exe (LABELLE_SDL2_LIB and the provider cache have none); the game needs it on PATH\n", .{}),
     }
     if (!fields.sdlRenderer()) return;
@@ -233,6 +234,7 @@ pub fn stageHook(r: Run) !void {
         .up_to_date, .no_bin_dir => {},
         .removed_stale => std.debug.print("labelle-sdl2: removed the SDL2_mixer.dll staged by an earlier build: LABELLE_SDL2_LIB has none now\n", .{}),
         .user_owned => std.debug.print("labelle-sdl2: warning: {s} holds an SDL2_mixer.dll this provider did not stage; left as is\n", .{bin}),
+        .unreadable => {},
         .not_found => std.debug.print("labelle-sdl2: warning: no SDL2_mixer.dll beside LABELLE_SDL2_LIB (lib/ or ../bin) to stage; the sdl backend's audio needs it next to the exe or on PATH\n", .{}),
     }
 }
